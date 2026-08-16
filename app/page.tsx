@@ -444,6 +444,160 @@ function getLanguageName(
   return "English";
 }
 
+function GlobeIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18" />
+      <path d="M12 3a13.5 13.5 0 0 1 3.5 9 13.5 13.5 0 0 1-3.5 9 13.5 13.5 0 0 1-3.5-9A13.5 13.5 0 0 1 12 3z" />
+    </svg>
+  );
+}
+
+function ChevronIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m6 9 6 6 6-6" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
+
+function SunIcon() {
+  return (
+    <svg
+      width="17"
+      height="17"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="12" cy="12" r="4.2" />
+      <path d="M12 2.5v2.4M12 19.1v2.4M4.2 4.2l1.7 1.7M18.1 18.1l1.7 1.7M2.5 12h2.4M19.1 12h2.4M4.2 19.8l1.7-1.7M18.1 5.9l1.7-1.7" />
+    </svg>
+  );
+}
+
+function MoonIcon() {
+  return (
+    <svg
+      width="17"
+      height="17"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M20.5 13.4A8.5 8.5 0 1 1 10.6 3.5a6.7 6.7 0 0 0 9.9 9.9z" />
+    </svg>
+  );
+}
+
+function FlaskIcon() {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M9.5 2.5v6.4a2.4 2.4 0 0 1-.35 1.24L4.03 18.6a2.1 2.1 0 0 0 1.8 3.15h12.34a2.1 2.1 0 0 0 1.8-3.15l-5.12-8.46a2.4 2.4 0 0 1-.35-1.24V2.5" />
+      <path d="M8 2.5h8" />
+      <path d="M6.6 15.5h10.8" />
+    </svg>
+  );
+}
+
+function TagIcon() {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M20.4 13.24 13.16 20.5a1.8 1.8 0 0 1-2.55 0L2.5 12.4V2.5h9.9l8.02 8.02a1.8 1.8 0 0 1-.02 2.72Z" />
+      <circle cx="7.3" cy="7.3" r="1.15" />
+    </svg>
+  );
+}
+
+function LoginIcon() {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M14.5 3.5h4a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2h-4" />
+      <path d="M9.5 7 14.5 12 9.5 17" />
+      <path d="M14.5 12h-12" />
+    </svg>
+  );
+}
+
+const LANGUAGE_OPTIONS: {
+  value: Language;
+  label: string;
+  code: string;
+}[] = [
+  { value: "en", label: "English", code: "EN" },
+  { value: "ru", label: "Русский", code: "RU" },
+  { value: "ko", label: "한국어", code: "KO" },
+];
+
 export default function Home() {
   const [
     language,
@@ -555,6 +709,17 @@ export default function Home() {
       null
     );
 
+  const [
+    languageOpen,
+    setLanguageOpen,
+  ] =
+    useState(false);
+
+  const languageMenuRef =
+    useRef<HTMLDivElement | null>(
+      null
+    );
+
   const inputRef =
     useRef<HTMLInputElement | null>(
       null
@@ -620,6 +785,15 @@ export default function Home() {
         )
       ) {
         setProfileOpen(false);
+      }
+
+      if (
+        languageMenuRef.current &&
+        !languageMenuRef.current.contains(
+          event.target as Node
+        )
+      ) {
+        setLanguageOpen(false);
       }
     }
 
@@ -1526,40 +1700,14 @@ export default function Home() {
               24,
           }}
         >
-          <a
-            href="/tools"
-            style={{
-              textDecoration:
-                "none",
-              padding:
-                "8px 12px",
-              borderRadius:
-                10,
-              border:
-                "1px solid currentColor",
-              opacity:
-                0.85,
-            }}
-          >
-            Learning Lab
+          <a href="/tools" className="nav-link">
+            <FlaskIcon />
+            <span>Learning Lab</span>
           </a>
 
-          <a
-            href="/pricing"
-            style={{
-              textDecoration:
-                "none",
-              padding:
-                "8px 12px",
-              borderRadius:
-                10,
-              border:
-                "1px solid currentColor",
-              opacity:
-                0.85,
-            }}
-          >
-            Plans
+          <a href="/pricing" className="nav-link">
+            <TagIcon />
+            <span>Plans</span>
           </a>
 
           {me?.authenticated ? (
@@ -1692,78 +1840,79 @@ export default function Home() {
               )}
             </div>
           ) : (
-            <a
-              href="/login"
-              style={{
-                textDecoration:
-                  "none",
-                padding:
-                  "8px 12px",
-                borderRadius:
-                  10,
-                border:
-                  "1px solid currentColor",
-                opacity:
-                  0.85,
-              }}
-            >
-              Sign in
+            <a href="/login" className="nav-link">
+              <LoginIcon />
+              <span>Sign in</span>
             </a>
           )}
         </div>
 
         <div className="topbar-actions">
-          <div className="control">
-            <span>
-              🌐
-            </span>
-
-            <select
-              value={
-                language
-              }
-              onChange={(
-                event
-              ) =>
-                handleLanguageChange(
-                  event
-                    .target
-                    .value as Language
+          <div
+            ref={languageMenuRef}
+            className="icon-control"
+            style={{ position: "relative" }}
+          >
+            <button
+              type="button"
+              className="icon-control-trigger"
+              onClick={() =>
+                setLanguageOpen(
+                  (previous) => !previous
                 )
               }
-              aria-label={
-                t.language
-              }
+              aria-label={t.language}
+              aria-expanded={languageOpen}
             >
-              <option value="en">
-                English
-              </option>
-
-              <option value="ru">
-                Русский
-              </option>
-
-              <option value="ko">
-                한국어
-              </option>
-            </select>
+              <GlobeIcon />
+              <span className="icon-control-label">
+                {
+                  LANGUAGE_OPTIONS.find(
+                    (option) =>
+                      option.value === language
+                  )?.code
+                }
+              </span>
+              <span className="icon-control-chevron">
+                <ChevronIcon />
+              </span>
+            </button>
 
             {translationLoading && (
               <span
-                style={{
-                  marginLeft:
-                    8,
-                  fontSize:
-                    12,
-                  opacity:
-                    0.7,
-                }}
-                aria-label={
-                  t.translating
-                }
+                className="icon-control-loading"
+                aria-label={t.translating}
               >
                 •••
               </span>
+            )}
+
+            {languageOpen && (
+              <div className="icon-control-menu">
+                {LANGUAGE_OPTIONS.map(
+                  (option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={`icon-control-item ${
+                        option.value === language
+                          ? "icon-control-item-active"
+                          : ""
+                      }`}
+                      onClick={() => {
+                        handleLanguageChange(
+                          option.value
+                        );
+                        setLanguageOpen(false);
+                      }}
+                    >
+                      <span>{option.label}</span>
+                      {option.value ===
+                        language && <CheckIcon />}
+                    </button>
+                  )
+                )}
+              </div>
             )}
           </div>
 
@@ -1781,10 +1930,11 @@ export default function Home() {
               t.theme
             }
           >
-            {theme ===
-            "dark"
-              ? "☀"
-              : "☾"}
+            {theme === "dark" ? (
+              <SunIcon />
+            ) : (
+              <MoonIcon />
+            )}
           </button>
         </div>
       </header>
