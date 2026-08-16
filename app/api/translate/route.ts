@@ -432,7 +432,7 @@ Return exactly this structure:
       process.env
         .GEMINI_MODEL_FAST
         ?.trim() ||
-      "gemini-2.5-flash";
+      "gemini-flash-latest";
 
     const response =
       await fetch(

@@ -529,6 +529,32 @@ export default function Home() {
   ] =
     useState(false);
 
+  const [
+    me,
+    setMe,
+  ] =
+    useState<{
+      authenticated: boolean;
+      user?: {
+        id: string;
+        email: string;
+      };
+      usage?: {
+        plan: "FREE" | "PRO" | "PREMIUM";
+      };
+    } | null>(null);
+
+  const [
+    profileOpen,
+    setProfileOpen,
+  ] =
+    useState(false);
+
+  const profileMenuRef =
+    useRef<HTMLDivElement | null>(
+      null
+    );
+
   const inputRef =
     useRef<HTMLInputElement | null>(
       null
@@ -567,6 +593,59 @@ export default function Home() {
         doc.status ===
         "error"
     ).length;
+
+  useEffect(() => {
+    fetch("/api/auth/me")
+      .then((response) =>
+        response.json()
+      )
+      .then((data) =>
+        setMe(data)
+      )
+      .catch(() =>
+        setMe({
+          authenticated: false,
+        })
+      );
+  }, []);
+
+  useEffect(() => {
+    function handleClickOutside(
+      event: MouseEvent
+    ) {
+      if (
+        profileMenuRef.current &&
+        !profileMenuRef.current.contains(
+          event.target as Node
+        )
+      ) {
+        setProfileOpen(false);
+      }
+    }
+
+    document.addEventListener(
+      "mousedown",
+      handleClickOutside
+    );
+
+    return () =>
+      document.removeEventListener(
+        "mousedown",
+        handleClickOutside
+      );
+  }, []);
+
+  async function signOut() {
+    try {
+      await fetch("/api/auth/logout", {
+        method: "POST",
+      });
+    } catch {
+      // ignore network errors on sign out
+    }
+
+    window.location.href = "/";
+  }
 
   useEffect(() => {
     try {
@@ -1483,23 +1562,154 @@ export default function Home() {
             Plans
           </a>
 
-          <a
-            href="/login"
-            style={{
-              textDecoration:
-                "none",
-              padding:
-                "8px 12px",
-              borderRadius:
-                10,
-              border:
-                "1px solid currentColor",
-              opacity:
-                0.85,
-            }}
-          >
-            Sign in
-          </a>
+          {me?.authenticated ? (
+            <div
+              ref={profileMenuRef}
+              style={{
+                position: "relative",
+              }}
+            >
+              <button
+                onClick={() =>
+                  setProfileOpen(
+                    (previous) => !previous
+                  )
+                }
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "6px 12px",
+                  borderRadius: 10,
+                  border:
+                    "1px solid currentColor",
+                  opacity: 0.85,
+                  background: "transparent",
+                  color: "inherit",
+                  cursor: "pointer",
+                  font: "inherit",
+                }}
+                aria-label="Account menu"
+              >
+                <span
+                  style={{
+                    width: 22,
+                    height: 22,
+                    borderRadius: "50%",
+                    border:
+                      "1px solid currentColor",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent:
+                      "center",
+                    fontSize: 12,
+                    fontWeight: 700,
+                  }}
+                >
+                  {(
+                    me.user?.email?.[0] ||
+                    "?"
+                  ).toUpperCase()}
+                </span>
+
+                {me.usage?.plan ===
+                  "PRO" ||
+                me.usage?.plan ===
+                  "PREMIUM"
+                  ? me.usage.plan
+                  : ""}
+              </button>
+
+              {profileOpen && (
+                <div
+                  style={{
+                    position: "absolute",
+                    right: 0,
+                    top: "calc(100% + 8px)",
+                    minWidth: 200,
+                    padding: 10,
+                    borderRadius: 12,
+                    border:
+                      "1px solid currentColor",
+                    background:
+                      "var(--panel, #111113)",
+                    zIndex: 20,
+                  }}
+                >
+                  <div
+                    style={{
+                      padding: "6px 8px",
+                      fontSize: 13,
+                      opacity: 0.8,
+                      wordBreak: "break-all",
+                    }}
+                  >
+                    {me.user?.email}
+                  </div>
+
+                  <div
+                    style={{
+                      padding: "2px 8px 8px",
+                      fontSize: 12,
+                      opacity: 0.6,
+                    }}
+                  >
+                    Plan:{" "}
+                    {me.usage?.plan || "FREE"}
+                  </div>
+
+                  <a
+                    href="/account"
+                    style={{
+                      display: "block",
+                      textDecoration: "none",
+                      padding: "8px",
+                      borderRadius: 8,
+                      color: "inherit",
+                    }}
+                  >
+                    Account
+                  </a>
+
+                  <button
+                    onClick={signOut}
+                    style={{
+                      display: "block",
+                      width: "100%",
+                      textAlign: "left",
+                      padding: "8px",
+                      borderRadius: 8,
+                      border: 0,
+                      background: "transparent",
+                      color: "inherit",
+                      cursor: "pointer",
+                      font: "inherit",
+                    }}
+                  >
+                    Sign out
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <a
+              href="/login"
+              style={{
+                textDecoration:
+                  "none",
+                padding:
+                  "8px 12px",
+                borderRadius:
+                  10,
+                border:
+                  "1px solid currentColor",
+                opacity:
+                  0.85,
+              }}
+            >
+              Sign in
+            </a>
+          )}
         </div>
 
         <div className="topbar-actions">

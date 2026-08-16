@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 type Plan = {
   id: "FREE" | "PRO" | "PREMIUM";
@@ -58,6 +58,19 @@ export default function PricingPage() {
   const [msg, setMsg] = useState("");
   const [loadingPlan, setLoadingPlan] =
     useState<Plan["id"] | null>(null);
+  const [currentPlan, setCurrentPlan] =
+    useState<Plan["id"] | null>(null);
+
+  useEffect(() => {
+    fetch("/api/auth/me")
+      .then((response) => response.json())
+      .then((data) => {
+        if (data?.authenticated && data?.usage?.plan) {
+          setCurrentPlan(data.usage.plan);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   async function subscribe(plan: Plan["id"]) {
     setMsg("");
@@ -156,11 +169,35 @@ export default function PricingPage() {
               key={plan.id}
               style={{
                 padding: 22,
-                border: "1px solid #27272a",
+                border:
+                  currentPlan === plan.id
+                    ? "1px solid #a1a1aa"
+                    : "1px solid #27272a",
                 borderRadius: 18,
                 background: "#111113",
+                position: "relative",
               }}
             >
+              {currentPlan === plan.id && (
+                <span
+                  style={{
+                    position: "absolute",
+                    top: 18,
+                    right: 18,
+                    fontSize: 11,
+                    fontWeight: 700,
+                    letterSpacing: 0.4,
+                    textTransform: "uppercase",
+                    color: "#d4d4d8",
+                    border: "1px solid #3f3f46",
+                    borderRadius: 999,
+                    padding: "3px 9px",
+                  }}
+                >
+                  Current plan
+                </span>
+              )}
+
               <h2>{plan.name}</h2>
 
               <div

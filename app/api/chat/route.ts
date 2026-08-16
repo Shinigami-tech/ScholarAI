@@ -33,7 +33,7 @@ type UsageError = Error & {
 
 const MODEL =
   process.env.GEMINI_MODEL?.trim() ||
-  "gemini-2.5-flash";
+  "gemini-flash-latest";
 
 const MAX_QUESTION_LENGTH = 12000;
 const MAX_HISTORY_MESSAGES = 20;

@@ -2,8 +2,8 @@ import { GoogleGenAI } from "@google/genai";
 
 export type GeminiTask = "light" | "reasoning";
 
-const DEFAULT_LIGHT_MODEL = "gemini-2.5-flash";
-const DEFAULT_REASONING_MODEL = "gemini-2.5-flash";
+const DEFAULT_LIGHT_MODEL = "gemini-flash-latest";
+const DEFAULT_REASONING_MODEL = "gemini-flash-latest";
 
 export function getGeminiClient() {
   const apiKey = process.env.GEMINI_API_KEY?.trim();

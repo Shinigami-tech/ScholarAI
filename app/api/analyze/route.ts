@@ -32,7 +32,7 @@ const MAX_FILE_NAME_LENGTH = 255;
 
 const MODEL =
   process.env.GEMINI_MODEL?.trim() ||
-  "gemini-2.5-flash";
+  "gemini-flash-latest";
 
 const MAX_PROCESSING_ATTEMPTS = 120;
 const PROCESSING_INTERVAL_MS = 2000;
