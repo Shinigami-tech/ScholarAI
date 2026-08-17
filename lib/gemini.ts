@@ -39,6 +39,53 @@ function isDailyQuotaExhausted(error: unknown) {
   );
 }
 
+// A single generateContent call has no timeout of its own — if Gemini is
+// overloaded (the "high demand" 503s we see alongside this) it can just
+// hang on one in-flight call for the whole remaining budget. Our retry
+// loop only checked the deadline BETWEEN attempts, so a single stuck call
+// would sail right past that check and get hard-killed by Vercel's own
+// 60s limit instead of failing cleanly through our error handling. Racing
+// every attempt against the remaining deadline closes that gap.
+function withTimeout<T>(
+  operation: () => Promise<T>,
+  deadline?: number
+): Promise<T> {
+  if (!deadline) {
+    return operation();
+  }
+
+  const remaining = deadline - Date.now();
+
+  if (remaining <= 0) {
+    return Promise.reject(
+      new Error(
+        "Gemini is taking too long to respond — please try again in a moment."
+      )
+    );
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(
+        new Error(
+          "Gemini is taking too long to respond — please try again in a moment."
+        )
+      );
+    }, remaining);
+
+    operation().then(
+      (value) => {
+        clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeoutId);
+        reject(error);
+      }
+    );
+  });
+}
+
 export async function generateText(input: {
   prompt: string;
   task?: GeminiTask;
@@ -52,14 +99,18 @@ export async function generateText(input: {
 
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      const response = await ai.models.generateContent({
-        model,
-        contents: [{ role: "user", parts: [{ text: input.prompt }] }],
-        config: {
-          maxOutputTokens: input.maxOutputTokens ?? 2048,
-          ...(input.responseMimeType ? { responseMimeType: input.responseMimeType } : {}),
-        },
-      });
+      const response = await withTimeout(
+        () =>
+          ai.models.generateContent({
+            model,
+            contents: [{ role: "user", parts: [{ text: input.prompt }] }],
+            config: {
+              maxOutputTokens: input.maxOutputTokens ?? 2048,
+              ...(input.responseMimeType ? { responseMimeType: input.responseMimeType } : {}),
+            },
+          }),
+        input.deadline
+      );
       return response.text?.trim() || "";
     } catch (error) {
       last = error;

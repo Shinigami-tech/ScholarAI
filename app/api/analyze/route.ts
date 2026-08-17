@@ -319,6 +319,61 @@ function isDailyQuotaExhausted(
   );
 }
 
+// A single Gemini call has no timeout of its own — if the model is
+// overloaded it can hang on one in-flight call for the whole remaining
+// budget. The old deadline check only ran BETWEEN retry attempts, so a
+// single stuck call sailed right past it and got hard-killed by Vercel's
+// own 60s limit (an opaque platform timeout) instead of failing cleanly
+// through our own error handling. Racing every attempt against the
+// remaining deadline closes that gap.
+function withTimeout<T>(
+  operation: () => Promise<T>,
+  deadline?: number
+): Promise<T> {
+  if (!deadline) {
+    return operation();
+  }
+
+  const remaining =
+    deadline - Date.now();
+
+  if (remaining <= 0) {
+    return Promise.reject(
+      new Error(
+        "Gemini is taking too long to respond — please try again in a moment."
+      )
+    );
+  }
+
+  return new Promise<T>(
+    (resolve, reject) => {
+      const timeoutId =
+        setTimeout(() => {
+          reject(
+            new Error(
+              "Gemini is taking too long to respond — please try again in a moment."
+            )
+          );
+        }, remaining);
+
+      operation().then(
+        (value) => {
+          clearTimeout(
+            timeoutId
+          );
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(
+            timeoutId
+          );
+          reject(error);
+        }
+      );
+    }
+  );
+}
+
 async function withRetry<T>(
   operation: () => Promise<T>,
   deadline?: number
@@ -332,7 +387,10 @@ async function withRetry<T>(
     attempt++
   ) {
     try {
-      return await operation();
+      return await withTimeout(
+        operation,
+        deadline
+      );
     } catch (error) {
       lastError = error;
 
