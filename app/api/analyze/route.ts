@@ -563,6 +563,69 @@ async function saveRequestBodyToFile(
   }
 }
 
+// For files small enough to inline, we already skip the disk entirely
+// (see the fast path in POST below) — this just accumulates the request
+// body straight into memory instead of streaming it to a temp file we'd
+// only turn around and read back. Bounded by maxFileSize so it can't run
+// away; callers only use this once Content-Length already told us the
+// upload is within INLINE_MAX_FILE_SIZE.
+async function readRequestBodyToBuffer(
+  request: Request,
+  maxFileSize: number
+): Promise<Buffer> {
+  if (!request.body) {
+    throw new Error(
+      "Request body is empty."
+    );
+  }
+
+  const webStream =
+    request.body as unknown as NodeReadableStream<Uint8Array>;
+
+  const nodeStream =
+    Readable.fromWeb(
+      webStream
+    );
+
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+
+  for await (
+    const chunk
+    of nodeStream
+  ) {
+    const buffer =
+      Buffer.isBuffer(
+        chunk
+      )
+        ? chunk
+        : Buffer.from(
+            chunk
+          );
+
+    totalBytes +=
+      buffer.length;
+
+    if (
+      totalBytes >
+      maxFileSize
+    ) {
+      throw new Error(
+        `The uploaded file is larger than the allowed limit of ${formatBytes(
+          maxFileSize
+        )}.`
+      );
+    }
+
+    chunks.push(buffer);
+  }
+
+  return Buffer.concat(
+    chunks,
+    totalBytes
+  );
+}
+
 async function waitForFileProcessing(
   ai: GoogleGenAI,
   fileName: string,
@@ -892,25 +955,15 @@ async function getFilePart(
   );
 }
 
-async function analyzeFile(
+async function runAnalysis(
   ai: GoogleGenAI,
-  filePath: string,
+  filePart: ReturnType<
+    typeof createPartFromBase64
+  >,
   fileName: string,
-  mimeType: string,
   language: string,
-  fileSize: number,
   deadline: number
 ): Promise<AnalysisResult> {
-  const filePart =
-    await getFilePart(
-      ai,
-      filePath,
-      fileName,
-      mimeType,
-      fileSize,
-      deadline
-    );
-
   const response =
     await withRetry(
       () =>
@@ -1032,6 +1085,34 @@ async function analyzeFile(
   return cleanAnalysis(
     parsed,
     fileName
+  );
+}
+
+async function analyzeFile(
+  ai: GoogleGenAI,
+  filePath: string,
+  fileName: string,
+  mimeType: string,
+  language: string,
+  fileSize: number,
+  deadline: number
+): Promise<AnalysisResult> {
+  const filePart =
+    await getFilePart(
+      ai,
+      filePath,
+      fileName,
+      mimeType,
+      fileSize,
+      deadline
+    );
+
+  return runAnalysis(
+    ai,
+    filePart,
+    fileName,
+    language,
+    deadline
   );
 }
 
@@ -1272,21 +1353,27 @@ export async function POST(
         mimeType
       );
 
-    const contentLength =
+    const contentLengthHeader =
       request.headers.get(
         "content-length"
       );
 
-    if (
-      contentLength &&
+    const contentLengthNum =
+      contentLengthHeader &&
       Number.isFinite(
         Number(
-          contentLength
+          contentLengthHeader
         )
-      ) &&
-      Number(
-        contentLength
-      ) >
+      )
+        ? Number(
+            contentLengthHeader
+          )
+        : null;
+
+    if (
+      contentLengthNum !==
+        null &&
+      contentLengthNum >
         maxFileSize
     ) {
       return Response.json(
@@ -1311,52 +1398,106 @@ export async function POST(
       );
     }
 
-    tempFilePath =
-      path.join(
-        os.tmpdir(),
-        `scholarai-${randomUUID()}-${fileName.replace(
-          /[^a-zA-Z0-9._-]/g,
-          "_"
-        )}`
-      );
-
-    const size =
-      await saveRequestBodyToFile(
-        request,
-        tempFilePath,
-        maxFileSize
-      );
-
-    if (
-      size <= 0
-    ) {
-      return Response.json(
-        {
-          success: false,
-          error:
-            "The uploaded file is empty.",
-        },
-        {
-          status: 400,
-        }
-      );
-    }
-
     const ai =
       new GoogleGenAI({
         apiKey,
       });
 
-    const analysis =
-      await analyzeFile(
-        ai,
-        tempFilePath,
-        fileName,
-        mimeType,
-        language,
-        size,
-        deadline
-      );
+    let analysis: AnalysisResult;
+    let size: number;
+
+    // Fast path: when Content-Length already tells us the upload fits
+    // inline, buffer it straight into memory and skip the temp-file
+    // round trip entirely — writing the whole body to disk and then
+    // immediately reading it back was pure overhead on every single
+    // analysis, tiny files included. Large/unknown-size uploads still
+    // stream to disk below with bounded memory, same as before.
+    if (
+      contentLengthNum !==
+        null &&
+      contentLengthNum <=
+        INLINE_MAX_FILE_SIZE
+    ) {
+      const buffer =
+        await readRequestBodyToBuffer(
+          request,
+          maxFileSize
+        );
+
+      size = buffer.length;
+
+      if (size <= 0) {
+        return Response.json(
+          {
+            success: false,
+            error:
+              "The uploaded file is empty.",
+          },
+          {
+            status: 400,
+          }
+        );
+      }
+
+      const filePart =
+        createPartFromBase64(
+          buffer.toString(
+            "base64"
+          ),
+          mimeType
+        );
+
+      analysis =
+        await runAnalysis(
+          ai,
+          filePart,
+          fileName,
+          language,
+          deadline
+        );
+    } else {
+      tempFilePath =
+        path.join(
+          os.tmpdir(),
+          `scholarai-${randomUUID()}-${fileName.replace(
+            /[^a-zA-Z0-9._-]/g,
+            "_"
+          )}`
+        );
+
+      size =
+        await saveRequestBodyToFile(
+          request,
+          tempFilePath,
+          maxFileSize
+        );
+
+      if (
+        size <= 0
+      ) {
+        return Response.json(
+          {
+            success: false,
+            error:
+              "The uploaded file is empty.",
+          },
+          {
+            status: 400,
+          }
+        );
+      }
+
+      analysis =
+        await analyzeFile(
+          ai,
+          tempFilePath,
+          fileName,
+          mimeType,
+          language,
+          size,
+          deadline
+        );
+    }
 
     return Response.json(
       {
