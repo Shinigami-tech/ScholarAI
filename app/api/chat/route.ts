@@ -12,7 +12,7 @@ export const dynamic = "force-dynamic";
 // Drake randomly failing instead of just taking a bit longer.
 export const maxDuration = 60;
 
-const REQUEST_DEADLINE_MS = 50 * 1000;
+const REQUEST_DEADLINE_MS = 22 * 1000;
 
 type DocumentContext = {
   fileName?: string;

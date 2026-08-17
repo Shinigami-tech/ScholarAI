@@ -30,9 +30,12 @@ export const dynamic = "force-dynamic";
 // 60s is the max the Hobby plan allows; Pro/Enterprise can go higher.
 export const maxDuration = 60;
 
-// Leave a safety margin under maxDuration so we can return a clean,
-// honest error instead of getting hard-killed by the platform mid-request.
-const REQUEST_DEADLINE_MS = 50 * 1000;
+// Deliberately much tighter than maxDuration. A long deadline (e.g. 50s)
+// means a user staring at a spinner during a Gemini slowdown waits nearly
+// a minute before finding out it failed — worse than a quick, honest
+// "try again." 22s trades a slightly higher fail rate on unusually large
+// documents for failing fast on the common case (an overloaded/slow call).
+const REQUEST_DEADLINE_MS = 22 * 1000;
 
 const GENERAL_MAX_FILE_SIZE =
   1024 * 1024 * 1024;

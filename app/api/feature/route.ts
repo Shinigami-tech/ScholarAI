@@ -19,7 +19,7 @@ export const dynamic = "force-dynamic";
 // what was cutting off Learning Lab tools (Voice Tutor, etc.) mid-request.
 export const maxDuration = 60;
 
-const REQUEST_DEADLINE_MS = 50 * 1000;
+const REQUEST_DEADLINE_MS = 22 * 1000;
 
 const MAX_BODY = 50000;
 
