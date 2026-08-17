@@ -7,6 +7,21 @@ import {
   NextResponse,
 } from "next/server";
 
+// Same class of bug as /api/analyze and /api/chat had before: with no
+// maxDuration set, Vercel caps this route at the platform default (10s)
+// and silently kills it — for anything more than a document or two,
+// translation legitimately takes longer than that. On top of that this
+// route had zero retry logic, so a single transient hiccup from Gemini
+// just failed outright instead of getting a second try.
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 60;
+
+const REQUEST_DEADLINE_MS = 22 * 1000;
+
+const RETRY_ATTEMPTS = 3;
+const RETRY_BASE_DELAY = 1200;
+
 type Language = "en" | "ru" | "ko";
 
 type Flashcard = {
@@ -249,6 +264,358 @@ function isTranslationResult(
   );
 }
 
+function sleep(ms: number) {
+  return new Promise<void>(
+    (resolve) =>
+      setTimeout(
+        resolve,
+        ms
+      )
+  );
+}
+
+function getErrorMessage(
+  error: unknown
+) {
+  if (
+    error instanceof Error
+  ) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
+function isRetryableError(
+  error: unknown
+) {
+  const message =
+    getErrorMessage(
+      error
+    ).toLowerCase();
+
+  return (
+    message.includes("429") ||
+    message.includes("500") ||
+    message.includes("502") ||
+    message.includes("503") ||
+    message.includes("504") ||
+    message.includes(
+      "resource exhausted"
+    ) ||
+    message.includes(
+      "overloaded"
+    ) ||
+    message.includes(
+      "unavailable"
+    ) ||
+    message.includes(
+      "timeout"
+    )
+  );
+}
+
+// Same distinction as the other Gemini routes: a daily-quota 429 won't
+// resolve itself in a few seconds (Google itself asks for 45s+), so it's
+// treated as non-retryable and surfaced immediately instead of burning
+// the request's time budget on pointless retries.
+function isDailyQuotaExhausted(
+  error: unknown
+) {
+  const message =
+    getErrorMessage(
+      error
+    ).toLowerCase();
+
+  return (
+    message.includes(
+      "resource_exhausted"
+    ) ||
+    (message.includes("429") &&
+      message.includes(
+        "quota"
+      )) ||
+    message.includes(
+      "free_tier_requests"
+    )
+  );
+}
+
+// Races a single attempt against the remaining deadline so one stuck
+// call can't silently eat the whole request budget — same fix applied
+// to /api/analyze, /api/chat and lib/gemini.ts after a Gemini slowdown
+// caused calls to hang instead of failing fast.
+function withTimeout<T>(
+  operation: () => Promise<T>,
+  deadline: number
+): Promise<T> {
+  const remaining =
+    deadline - Date.now();
+
+  if (remaining <= 0) {
+    return Promise.reject(
+      new Error(
+        "Translation is taking too long — please try again in a moment."
+      )
+    );
+  }
+
+  return new Promise<T>(
+    (resolve, reject) => {
+      const timeoutId =
+        setTimeout(() => {
+          reject(
+            new Error(
+              "Translation is taking too long — please try again in a moment."
+            )
+          );
+        }, remaining);
+
+      operation().then(
+        (value) => {
+          clearTimeout(
+            timeoutId
+          );
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(
+            timeoutId
+          );
+          reject(error);
+        }
+      );
+    }
+  );
+}
+
+function buildSingleDocumentPrompt(
+  document: TranslationDocument,
+  languageName: string
+) {
+  return `
+You are the translation engine for ScholarAI.
+
+Translate the provided academic document analysis into ${languageName}.
+
+IMPORTANT RULES:
+
+1. Translate every human-readable piece of content.
+2. Translate:
+   - title
+   - summary
+   - keyIdeas
+   - simpleExplanation
+   - flashcard questions
+   - flashcard answers
+3. Do NOT translate the product/website name "ScholarAI".
+4. Preserve names of people, places, organizations, books, anime, manga, scientific terms and other proper nouns when appropriate.
+5. Do not summarize.
+6. Do not shorten.
+7. Do not add information.
+8. Do not remove information.
+9. Preserve the exact JSON structure.
+10. Return ONLY valid JSON.
+11. Do not wrap the JSON in markdown.
+12. Keep the document ID exactly unchanged.
+
+Target language:
+${languageName}
+
+Input document:
+
+${JSON.stringify(
+  document,
+  null,
+  2
+)}
+
+Return exactly this structure:
+
+{
+  "id": "same-document-id",
+  "analysis": {
+    "title": "...",
+    "summary": ["..."],
+    "keyIdeas": ["..."],
+    "simpleExplanation": "...",
+    "flashcards": [
+      {
+        "question": "...",
+        "answer": "..."
+      }
+    ]
+  }
+}
+`;
+}
+
+async function translateDocument(
+  document: TranslationDocument,
+  languageName: string,
+  apiKey: string,
+  model: string,
+  deadline: number
+): Promise<TranslationResult> {
+  const prompt =
+    buildSingleDocumentPrompt(
+      document,
+      languageName
+    );
+
+  let lastError: unknown;
+
+  for (
+    let attempt = 1;
+    attempt <=
+    RETRY_ATTEMPTS;
+    attempt++
+  ) {
+    try {
+      const response =
+        await withTimeout(
+          () =>
+            fetch(
+              `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+              {
+                method: "POST",
+
+                headers: {
+                  "Content-Type":
+                    "application/json",
+                },
+
+                body: JSON.stringify(
+                  {
+                    contents: [
+                      {
+                        role: "user",
+                        parts: [
+                          {
+                            text: prompt,
+                          },
+                        ],
+                      },
+                    ],
+
+                    generationConfig: {
+                      temperature: 0.1,
+
+                      responseMimeType:
+                        "application/json",
+                    },
+                  }
+                ),
+
+                cache: "no-store",
+              }
+            ),
+          deadline
+        );
+
+      const rawText =
+        await response.text();
+
+      let data:
+        | GeminiResponse
+        | null = null;
+
+      try {
+        const parsedData =
+          JSON.parse(
+            rawText
+          ) as unknown;
+
+        if (
+          parsedData &&
+          typeof parsedData ===
+            "object"
+        ) {
+          data =
+            parsedData as GeminiResponse;
+        }
+      } catch {
+        data = null;
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          data?.error
+            ?.message ||
+            `Gemini API error (${response.status}).`
+        );
+      }
+
+      const text =
+        data?.candidates?.[0]
+          ?.content?.parts?.[0]
+          ?.text;
+
+      if (
+        typeof text !==
+          "string" ||
+        !text.trim()
+      ) {
+        throw new Error(
+          "Gemini returned an empty translation."
+        );
+      }
+
+      const extracted =
+        extractJson(text);
+
+      if (
+        !isTranslationResult(
+          extracted
+        )
+      ) {
+        throw new Error(
+          "Invalid translation structure returned by Gemini."
+        );
+      }
+
+      return {
+        id: extracted.id,
+        analysis:
+          extracted.analysis,
+      };
+    } catch (error) {
+      lastError = error;
+
+      if (
+        isDailyQuotaExhausted(
+          error
+        ) ||
+        !isRetryableError(
+          error
+        ) ||
+        attempt ===
+          RETRY_ATTEMPTS
+      ) {
+        throw error;
+      }
+
+      const delay =
+        RETRY_BASE_DELAY *
+        Math.pow(
+          2,
+          attempt - 1
+        );
+
+      if (
+        Date.now() + delay >
+        deadline
+      ) {
+        throw error;
+      }
+
+      await sleep(delay);
+    }
+  }
+
+  throw lastError;
+}
+
 export async function POST(
   request: NextRequest
 ) {
@@ -367,248 +734,91 @@ export async function POST(
         language
       );
 
-    const prompt = `
-You are the translation engine for ScholarAI.
-
-Translate ALL provided academic document analyses into ${languageName}.
-
-IMPORTANT RULES:
-
-1. Translate every human-readable piece of content.
-2. Translate:
-   - title
-   - summary
-   - keyIdeas
-   - simpleExplanation
-   - flashcard questions
-   - flashcard answers
-3. Do NOT translate the product/website name "ScholarAI".
-4. Preserve names of people, places, organizations, books, anime, manga, scientific terms and other proper nouns when appropriate.
-5. Do not summarize.
-6. Do not shorten.
-7. Do not add information.
-8. Do not remove information.
-9. Preserve the exact JSON structure.
-10. Return ONLY valid JSON.
-11. Do not wrap the JSON in markdown.
-12. Every document must be returned.
-13. Keep the document IDs exactly unchanged.
-
-Target language:
-${languageName}
-
-Input documents:
-
-${JSON.stringify(
-  documents,
-  null,
-  2
-)}
-
-Return exactly this structure:
-
-{
-  "translations": [
-    {
-      "id": "same-document-id",
-      "analysis": {
-        "title": "...",
-        "summary": ["..."],
-        "keyIdeas": ["..."],
-        "simpleExplanation": "...",
-        "flashcards": [
-          {
-            "question": "...",
-            "answer": "..."
-          }
-        ]
-      }
-    }
-  ]
-}
-`;
-
     const model =
       process.env
         .GEMINI_MODEL_FAST
         ?.trim() ||
       "gemini-flash-latest";
 
-    const response =
-      await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-        {
-          method: "POST",
+    const deadline =
+      Date.now() +
+      REQUEST_DEADLINE_MS;
 
-          headers: {
-            "Content-Type":
-              "application/json",
-          },
-
-          body:
-            JSON.stringify({
-              contents: [
-                {
-                  role: "user",
-                  parts: [
-                    {
-                      text: prompt,
-                    },
-                  ],
-                },
-              ],
-
-              generationConfig: {
-                temperature: 0.1,
-
-                responseMimeType:
-                  "application/json",
-              },
-            }),
-
-          cache: "no-store",
-        }
+    // Translating was previously ONE giant request covering every
+    // document at once — with several saved documents that prompt (and
+    // the expected output) grows large, which is the other big reason
+    // this "loaded forever." Translating each document in its own
+    // smaller, independent request run CONCURRENTLY cuts wall-clock time
+    // from "sum of every document" down to roughly "the slowest single
+    // document," and a stuck/failed translation for one document no
+    // longer blocks the rest.
+    const settled =
+      await Promise.allSettled(
+        documents.map(
+          (document) =>
+            translateDocument(
+              document,
+              languageName,
+              apiKey,
+              model,
+              deadline
+            )
+        )
       );
 
-    const rawText =
-      await response.text();
+    let quotaExhausted = false;
 
-    let data:
-      | GeminiResponse
-      | null = null;
-
-    try {
-      const parsedData =
-        JSON.parse(
-          rawText
-        ) as unknown;
-
-      if (
-        parsedData &&
-        typeof parsedData ===
-          "object"
-      ) {
-        data =
-          parsedData as GeminiResponse;
-      }
-    } catch {
-      data = null;
-    }
-
-    if (!response.ok) {
-      if (
-        response.status === 429
-      ) {
-        return NextResponse.json(
-          {
-            error:
-              "Gemini API quota is exhausted. The translation request was stopped safely. Please wait for the quota reset or use a Gemini API project with available quota.",
-            code:
-              "GEMINI_QUOTA_EXHAUSTED",
-          },
-          {
-            status: 429,
+    const translations: TranslationResult[] =
+      settled.map(
+        (result, index) => {
+          if (
+            result.status ===
+            "fulfilled"
+          ) {
+            return result.value;
           }
-        );
-      }
 
-      return NextResponse.json(
-        {
-          error:
-            data?.error
-              ?.message ||
-            `Gemini API error (${response.status}).`,
-        },
-        {
-          status:
-            response.status,
+          if (
+            isDailyQuotaExhausted(
+              result.reason
+            )
+          ) {
+            quotaExhausted = true;
+          }
+
+          // A single document's translation failing shouldn't nuke the
+          // whole batch — fall back to the original (untranslated)
+          // analysis for that one document so the user still gets
+          // everything else back successfully.
+          return {
+            id: documents[
+              index
+            ].id,
+            analysis:
+              documents[
+                index
+              ].analysis,
+          };
         }
       );
-    }
-
-    const text =
-      data?.candidates?.[0]
-        ?.content?.parts?.[0]
-        ?.text;
 
     if (
-      typeof text !==
-        "string" ||
-      !text.trim()
-    ) {
-      return NextResponse.json(
-        {
-          error:
-            "Gemini returned an empty translation.",
-        },
-        {
-          status: 502,
-        }
-      );
-    }
-
-    const extracted =
-      extractJson(text);
-
-    if (
-      !extracted ||
-      typeof extracted !==
-        "object"
-    ) {
-      return NextResponse.json(
-        {
-          error:
-            "Invalid translation structure returned by Gemini.",
-        },
-        {
-          status: 502,
-        }
-      );
-    }
-
-    const parsed =
-      extracted as ParsedTranslationResponse;
-
-    if (
-      !Array.isArray(
-        parsed.translations
+      quotaExhausted &&
+      settled.every(
+        (result) =>
+          result.status ===
+          "rejected"
       )
     ) {
       return NextResponse.json(
         {
           error:
-            "Invalid translation structure returned by Gemini.",
+            "Gemini API quota is exhausted. The translation request was stopped safely. Please wait for the quota reset or use a Gemini API project with available quota.",
+          code:
+            "GEMINI_QUOTA_EXHAUSTED",
         },
         {
-          status: 502,
-        }
-      );
-    }
-
-    const translations:
-      TranslationResult[] =
-      parsed.translations
-        .filter(
-          isTranslationResult
-        )
-        .map(
-          (item) => ({
-            id: item.id,
-            analysis:
-              item.analysis,
-          })
-        );
-
-    if (
-      translations.length === 0
-    ) {
-      return NextResponse.json(
-        {
-          error:
-            "No valid translated documents were returned.",
-        },
-        {
-          status: 502,
+          status: 429,
         }
       );
     }
