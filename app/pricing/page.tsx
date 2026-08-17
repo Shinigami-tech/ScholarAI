@@ -21,7 +21,7 @@ const plans: Plan[] = [
     id: "FREE",
     name: "Free",
     price: "$0",
-    limit: "5 units/day",
+    limit: "20 units/day",
     features: [
       "Document analysis",
       "Drake chat",
@@ -32,7 +32,7 @@ const plans: Plan[] = [
     id: "PRO",
     name: "Pro",
     price: "$6.99",
-    limit: "10 units/day",
+    limit: "75 units/day",
     features: [
       "All core study tools",
       "Exam Mode",
@@ -44,7 +44,7 @@ const plans: Plan[] = [
     id: "PREMIUM",
     name: "Premium",
     price: "$12.99",
-    limit: "30 units/day",
+    limit: "200 units/day",
     features: [
       "All Pro features",
       "More advanced operations",

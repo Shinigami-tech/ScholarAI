@@ -1,6 +1,7 @@
 import {
   GoogleGenAI,
   createPartFromUri,
+  createPartFromBase64,
 } from "@google/genai";
 
 import {
@@ -22,11 +23,31 @@ import type {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+// Vercel kills the function at the plan's execution limit regardless of
+// what our own retry/poll logic is doing. Without this, the platform
+// silently cuts requests off after the default 10s, which is what caused
+// "still loading forever then errors out" for anything but tiny files.
+// 60s is the max the Hobby plan allows; Pro/Enterprise can go higher.
+export const maxDuration = 60;
+
+// Leave a safety margin under maxDuration so we can return a clean,
+// honest error instead of getting hard-killed by the platform mid-request.
+const REQUEST_DEADLINE_MS = 50 * 1000;
+
 const GENERAL_MAX_FILE_SIZE =
   1024 * 1024 * 1024;
 
 const PDF_MAX_FILE_SIZE =
   50 * 1024 * 1024;
+
+// Below this size, send the file inline in the same request instead of
+// going through Gemini's Files API (upload, then poll files.get every
+// 2s until it reports ACTIVE). That upload+poll round trip was adding
+// several extra seconds to EVERY analysis, even for a one-page PDF —
+// this was the main cause of "why does a small document take so long."
+// 15MB stays safely under Gemini's inline request size ceiling.
+const INLINE_MAX_FILE_SIZE =
+  15 * 1024 * 1024;
 
 const MAX_FILE_NAME_LENGTH = 255;
 
@@ -273,8 +294,34 @@ function isRetryableError(
   );
 }
 
+// A daily quota exhausted error (RESOURCE_EXHAUSTED / free_tier_requests)
+// won't fix itself in the next few seconds — Google itself asks for a
+// 45s+ wait. Retrying it like a transient 503 just burns the request's
+// time budget for nothing, so we treat it as non-retryable here and let
+// it surface immediately with a clear message.
+function isDailyQuotaExhausted(
+  error: unknown
+) {
+  const message =
+    getErrorMessage(
+      error
+    ).toLowerCase();
+
+  return (
+    message.includes(
+      "resource_exhausted"
+    ) ||
+    (message.includes("429") &&
+      message.includes("quota")) ||
+    message.includes(
+      "free_tier_requests"
+    )
+  );
+}
+
 async function withRetry<T>(
-  operation: () => Promise<T>
+  operation: () => Promise<T>,
+  deadline?: number
 ): Promise<T> {
   let lastError: unknown;
 
@@ -290,6 +337,9 @@ async function withRetry<T>(
       lastError = error;
 
       if (
+        isDailyQuotaExhausted(
+          error
+        ) ||
         !isRetryableError(
           error
         ) ||
@@ -305,6 +355,17 @@ async function withRetry<T>(
           2,
           attempt - 1
         );
+
+      // Don't sleep past the request deadline just to throw anyway —
+      // fail now with a clear message instead of letting Vercel kill
+      // the function mid-sleep with an opaque platform timeout.
+      if (
+        deadline &&
+        Date.now() + delay >
+          deadline
+      ) {
+        throw error;
+      }
 
       await sleep(delay);
     }
@@ -336,6 +397,34 @@ async function saveRequestBodyToFile(
     createWriteStream(
       filePath
     );
+
+  // Attach exactly ONE "error" listener for the whole life of this
+  // stream and race against it below. The previous version registered
+  // a fresh once("error", ...) listener on every backpressure/drain
+  // cycle, which never got removed (only "drain" self-cleans) — large
+  // uploads with lots of backpressure would pile up 10+ listeners and
+  // trigger MaxListenersExceededWarning, adding real overhead exactly
+  // on the big files people complained were slow.
+  let streamErrorReject:
+    | ((error: unknown) => void)
+    | null = null;
+
+  const streamErrorPromise =
+    new Promise<never>(
+      (_, reject) => {
+        streamErrorReject =
+          reject;
+      }
+    );
+
+  writeStream.once(
+    "error",
+    (error) => {
+      streamErrorReject?.(
+        error
+      );
+    }
+  );
 
   let totalBytes = 0;
 
@@ -372,43 +461,33 @@ async function saveRequestBodyToFile(
           buffer
         )
       ) {
-        await new Promise<void>(
-          (
-            resolve,
-            reject
-          ) => {
-            writeStream.once(
-              "drain",
-              resolve
-            );
-
-            writeStream.once(
-              "error",
-              reject
-            );
-          }
-        );
+        await Promise.race([
+          new Promise<void>(
+            (resolve) => {
+              writeStream.once(
+                "drain",
+                resolve
+              );
+            }
+          ),
+          streamErrorPromise,
+        ]);
       }
     }
 
-    await new Promise<void>(
-      (
-        resolve,
-        reject
-      ) => {
-        writeStream.once(
-          "finish",
-          resolve
-        );
+    await Promise.race([
+      new Promise<void>(
+        (resolve) => {
+          writeStream.once(
+            "finish",
+            resolve
+          );
 
-        writeStream.once(
-          "error",
-          reject
-        );
-
-        writeStream.end();
-      }
-    );
+          writeStream.end();
+        }
+      ),
+      streamErrorPromise,
+    ]);
 
     return totalBytes;
   } catch (error) {
@@ -428,7 +507,8 @@ async function saveRequestBodyToFile(
 
 async function waitForFileProcessing(
   ai: GoogleGenAI,
-  fileName: string
+  fileName: string,
+  deadline: number
 ) {
   for (
     let attempt = 0;
@@ -441,7 +521,8 @@ async function waitForFileProcessing(
         () =>
           ai.files.get({
             name: fileName,
-          })
+          }),
+        deadline
       );
 
     const state =
@@ -460,6 +541,18 @@ async function waitForFileProcessing(
     ) {
       throw new Error(
         "Gemini failed to process the uploaded file."
+      );
+    }
+
+    // Bail out early with a clear message instead of sleeping past the
+    // point where Vercel is about to kill the function anyway.
+    if (
+      Date.now() +
+        PROCESSING_INTERVAL_MS >
+      deadline
+    ) {
+      throw new Error(
+        "Gemini is still processing this file and it's taking longer than usual — please try again in a moment."
       );
     }
 
@@ -669,13 +762,33 @@ function cleanAnalysis(
   };
 }
 
-async function analyzeFile(
+async function getFilePart(
   ai: GoogleGenAI,
   filePath: string,
   fileName: string,
   mimeType: string,
-  language: string
-): Promise<AnalysisResult> {
+  fileSize: number,
+  deadline: number
+) {
+  if (
+    fileSize <=
+    INLINE_MAX_FILE_SIZE
+  ) {
+    const buffer =
+      await fs.readFile(
+        filePath
+      );
+
+    return createPartFromBase64(
+      buffer.toString(
+        "base64"
+      ),
+      mimeType
+    );
+  }
+
+  // Large files still need the Files API — inlining them would blow
+  // past the request size limit.
   const uploadedFile =
     await withRetry(
       () =>
@@ -687,7 +800,8 @@ async function analyzeFile(
               fileName,
             mimeType,
           },
-        })
+        }),
+      deadline
     );
 
   if (
@@ -701,7 +815,8 @@ async function analyzeFile(
   const activeFile =
     await waitForFileProcessing(
       ai,
-      uploadedFile.name
+      uploadedFile.name,
+      deadline
     );
 
   if (
@@ -713,10 +828,29 @@ async function analyzeFile(
     );
   }
 
+  return createPartFromUri(
+    activeFile.uri,
+    activeFile.mimeType
+  );
+}
+
+async function analyzeFile(
+  ai: GoogleGenAI,
+  filePath: string,
+  fileName: string,
+  mimeType: string,
+  language: string,
+  fileSize: number,
+  deadline: number
+): Promise<AnalysisResult> {
   const filePart =
-    createPartFromUri(
-      activeFile.uri,
-      activeFile.mimeType
+    await getFilePart(
+      ai,
+      filePath,
+      fileName,
+      mimeType,
+      fileSize,
+      deadline
     );
 
   const response =
@@ -805,7 +939,8 @@ async function analyzeFile(
               ],
             },
           },
-        })
+        }),
+      deadline
     );
 
   const rawText =
@@ -917,6 +1052,10 @@ function getHttpStatus(
 export async function POST(
   request: Request
 ) {
+  const deadline =
+    Date.now() +
+    REQUEST_DEADLINE_MS;
+
   try {
     const usageUser =
       await requireUserForApi();
@@ -1156,7 +1295,9 @@ export async function POST(
         tempFilePath,
         fileName,
         mimeType,
-        language
+        language,
+        size,
+        deadline
       );
 
     return Response.json(

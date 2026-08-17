@@ -15,6 +15,12 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+// Without this Vercel kills the function at the default 10s, which is
+// what was cutting off Learning Lab tools (Voice Tutor, etc.) mid-request.
+export const maxDuration = 60;
+
+const REQUEST_DEADLINE_MS = 50 * 1000;
+
 const MAX_BODY = 50000;
 
 type FeatureRequestBody = {
@@ -176,6 +182,10 @@ function getUsageErrorCode(
 export async function POST(
   request: Request
 ) {
+  const deadline =
+    Date.now() +
+    REQUEST_DEADLINE_MS;
+
   try {
     const body =
       await readInput(request);
@@ -237,6 +247,8 @@ export async function POST(
             "knowledgeMap"
             ? "application/json"
             : undefined,
+
+        deadline,
       });
 
     let data: unknown =
@@ -310,12 +322,36 @@ export async function POST(
       );
     }
 
+    if (
+      error instanceof Error &&
+      (error as { code?: string })
+        .code ===
+        "GEMINI_QUOTA_EXHAUSTED"
+    ) {
+      return NextResponse.json(
+        {
+          error: error.message,
+          code:
+            "GEMINI_QUOTA_EXHAUSTED",
+        },
+        {
+          status: 429,
+        }
+      );
+    }
+
+    // Google's raw API errors are long multi-line JSON blobs meant for
+    // developers, not something to dump in the UI. Log the real error
+    // server-side and show the user one clean sentence instead.
+    console.error(
+      "ScholarAI feature error:",
+      error
+    );
+
     return NextResponse.json(
       {
         error:
-          error instanceof Error
-            ? error.message
-            : "ScholarAI feature failed.",
+          "ScholarAI couldn't complete this right now. Please try again in a moment.",
       },
       {
         status: 500,

@@ -18,9 +18,25 @@ export function getGeminiModel(task: GeminiTask = "light") {
   return process.env.GEMINI_MODEL_FAST?.trim() || DEFAULT_LIGHT_MODEL;
 }
 
+type GeminiError = Error & { code?: string };
+
 function isRetryable(error: unknown) {
   const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
   return ["429", "500", "502", "503", "504", "resource exhausted", "overloaded", "timeout"].some((x) => message.includes(x));
+}
+
+// A 429 can mean two very different things: "you're sending requests too
+// fast, back off a bit" (worth retrying quickly) vs "you've used up your
+// whole daily quota for this model" (retrying in 1s/2s/4s is pointless —
+// Google's own error tells you to wait 45s+). We only want to burn retry
+// budget on the first kind, and fail fast + clearly on the second.
+function isDailyQuotaExhausted(error: unknown) {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return (
+    message.includes("resource_exhausted") ||
+    (message.includes("429") && message.includes("quota")) ||
+    message.includes("free_tier_requests")
+  );
 }
 
 export async function generateText(input: {
@@ -28,6 +44,7 @@ export async function generateText(input: {
   task?: GeminiTask;
   maxOutputTokens?: number;
   responseMimeType?: string;
+  deadline?: number;
 }) {
   const ai = getGeminiClient();
   const model = getGeminiModel(input.task);
@@ -46,8 +63,24 @@ export async function generateText(input: {
       return response.text?.trim() || "";
     } catch (error) {
       last = error;
+
+      if (isDailyQuotaExhausted(error)) {
+        const quotaError: GeminiError = new Error(
+          "ScholarAI's free daily AI quota has been used up. Please try again later, or ask the ScholarAI team to enable paid Gemini API billing to remove this limit."
+        );
+        quotaError.code = "GEMINI_QUOTA_EXHAUSTED";
+        throw quotaError;
+      }
+
       if (!isRetryable(error) || attempt === 3) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 1000 * Math.pow(2, attempt)));
+
+      const delay = 1000 * Math.pow(2, attempt);
+
+      if (input.deadline && Date.now() + delay > input.deadline) {
+        throw error;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
 

@@ -8,9 +8,9 @@ export type PlanConfig = {
 };
 
 export const PLANS: Record<Plan, PlanConfig> = {
-  FREE: { id: "FREE", name: "Free", priceMonthlyUsd: 0, dailyUnits: 5 },
-  PRO: { id: "PRO", name: "Pro", priceMonthlyUsd: 6.99, dailyUnits: 10 },
-  PREMIUM: { id: "PREMIUM", name: "Premium", priceMonthlyUsd: 12.99, dailyUnits: 30 },
+  FREE: { id: "FREE", name: "Free", priceMonthlyUsd: 0, dailyUnits: 20 },
+  PRO: { id: "PRO", name: "Pro", priceMonthlyUsd: 6.99, dailyUnits: 75 },
+  PREMIUM: { id: "PREMIUM", name: "Premium", priceMonthlyUsd: 12.99, dailyUnits: 200 },
 };
 
 export const UNIT_COSTS = {

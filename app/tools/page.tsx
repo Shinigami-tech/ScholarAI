@@ -218,6 +218,43 @@ const defaultPrompt: Record<
     "Activity today: 25 minutes study, 12 questions solved, 8 flashcards reviewed, 1 quiz completed.",
 };
 
+const toolCategories: Array<{
+  label: string;
+  hint: string;
+  ids: ToolId[];
+}> = [
+  {
+    label: "Study & Documents",
+    hint: "Turn material into something you can actually learn from.",
+    ids: [
+      "study",
+      "smartDocument",
+      "source",
+      "knowledgeMap",
+    ],
+  },
+  {
+    label: "Practice & Testing",
+    hint: "Check what you know and get ready for the real thing.",
+    ids: [
+      "exam",
+      "flashcards",
+      "quiz",
+      "math",
+    ],
+  },
+  {
+    label: "Talk & Capture",
+    hint: "Ask out loud or point your camera at a problem.",
+    ids: ["voice", "camera"],
+  },
+  {
+    label: "Progress & Rewards",
+    hint: "See how you're doing and stay motivated.",
+    ids: ["progress", "gamification"],
+  },
+];
+
 export default function ToolsPage() {
   const [
     active,
@@ -589,574 +626,201 @@ Please identify and solve the visible task.`
   }
 
   return (
-    <main
-      style={{
-        minHeight:
-          "100vh",
-        background:
-          "#0a0a0b",
-        color:
-          "#f4f4f5",
-        padding: 24,
-      }}
-    >
-      <div
-        style={{
-          maxWidth:
-            1180,
-          margin:
-            "0 auto",
-        }}
-      >
-        <div
-          style={{
-            display:
-              "flex",
-            justifyContent:
-              "space-between",
-            gap: 16,
-            alignItems:
-              "center",
-            marginBottom:
-              24,
-          }}
-        >
+    <main className="app-shell">
+      <div className="grid-background" />
+      <div className="ambient ambient-one" />
+      <div className="ambient ambient-two" />
+
+      <header className="topbar">
+        <div className="brand">
+          <div className="brand-mark">S</div>
           <div>
-            <div
-              style={{
-                opacity:
-                  0.55,
-              }}
-            >
-              ScholarAI
+            <div className="brand-name">
+              Scholar<span>AI</span>
+            </div>
+            <div className="brand-caption">Learning Lab</div>
+          </div>
+        </div>
+
+        <div className="topbar-actions">
+          {usage && (
+            <div className="tools-usage-badge">
+              <span className="pulse-dot" />
+              <strong>{usage.remaining ?? 0}</strong>&nbsp;units left today
+              &nbsp;·&nbsp;{usage.plan ?? "Free"}
+            </div>
+          )}
+
+          <a href="/" className="nav-link">
+            ← Back to ScholarAI
+          </a>
+        </div>
+      </header>
+
+      <section className="tools-hero">
+        <h1>Learning Lab</h1>
+        <p>Understand → Practice → Test → Improve.</p>
+      </section>
+
+      <section className="workspace tools-workspace">
+        {toolCategories.map((group) => (
+          <div key={group.label} className="tools-category">
+            <div className="tools-category-heading">
+              <h2 className="tools-category-title">{group.label}</h2>
+              <p className="tools-category-hint">{group.hint}</p>
             </div>
 
-            <h1
-              style={{
-                margin:
-                  "4px 0",
-                fontSize:
-                  36,
-              }}
-            >
-              Learning Lab
-            </h1>
+            <div className="tools-grid">
+              {group.ids.map((id) => {
+                const tool = tools.find(([toolId]) => toolId === id);
 
-            <p
-              style={{
-                opacity:
-                  0.65,
-              }}
-            >
-              Understand →
-              Practice → Test
-              → Improve.
-            </p>
-          </div>
-
-          <div
-            style={{
-              textAlign:
-                "right",
-            }}
-          >
-            {usage && (
-              <div
-                style={
-                  usageBadge
+                if (!tool) {
+                  return null;
                 }
-              >
-                <strong>
-                  {usage.remaining ??
-                    0}
-                </strong>{" "}
-                units left
-                today ·{" "}
-                {usage.plan ??
-                  "Free"}
-              </div>
-            )}
 
-            <Link
-              href="/"
-              style={{
-                color:
-                  "#fff",
-              }}
-            >
-              Back to
-              ScholarAI
-            </Link>
+                const [toolId, title, description] = tool;
+                const ToolIcon = iconMap[toolId];
+
+                return (
+                  <button
+                    key={toolId}
+                    type="button"
+                    className={`tool-card${
+                      active === toolId ? " tool-card-active" : ""
+                    }`}
+                    onClick={() => {
+                      setActive(toolId);
+                      setInput(defaultPrompt[toolId]);
+                      setResult(null);
+                      setError("");
+                    }}
+                  >
+                    <div className="tool-card-icon">
+                      <ToolIcon size={20} />
+                    </div>
+                    <h3>{title}</h3>
+                    <p>{description}</p>
+                  </button>
+                );
+              })}
+            </div>
           </div>
-        </div>
+        ))}
 
-        <div
-          style={{
-            display:
-              "grid",
-            gridTemplateColumns:
-              "repeat(auto-fit,minmax(220px,1fr))",
-            gap: 12,
-            marginBottom:
-              24,
-          }}
-        >
-          {tools.map(
-            ([
-              id,
-              title,
-              description,
-            ]) => {
-              const ToolIcon =
-                iconMap[id];
-
-              return (
-                <button
-                  key={id}
-                  onClick={() => {
-                    setActive(
-                      id
-                    );
-
-                    setInput(
-                      defaultPrompt[
-                        id
-                      ]
-                    );
-
-                    setResult(
-                      null
-                    );
-
-                    setError(
-                      ""
-                    );
-                  }}
-                  style={{
-                    ...card,
-                    textAlign:
-                      "left",
-                    cursor:
-                      "pointer",
-                    borderColor:
-                      active ===
-                      id
-                        ? "#71717a"
-                        : "#27272a",
-                  }}
-                >
-                  <ToolIcon
-                    size={
-                      20
-                    }
-                  />
-
-                  <h3
-                    style={{
-                      margin:
-                        "10px 0 6px",
-                    }}
-                  >
-                    {title}
-                  </h3>
-
-                  <p
-                    style={{
-                      margin:
-                        0,
-                      opacity:
-                        0.65,
-                      lineHeight:
-                        1.45,
-                    }}
-                  >
-                    {
-                      description
-                    }
-                  </p>
-                </button>
-              );
-            }
-          )}
-        </div>
-
-        <section
-          style={{
-            ...panel,
-            minHeight:
-              420,
-          }}
-        >
-          <div
-            style={{
-              display:
-                "flex",
-              gap: 14,
-              alignItems:
-                "center",
-              marginBottom:
-                18,
-            }}
-          >
-            <Icon
-              size={24}
-            />
+        <section className="tools-panel">
+          <div className="tools-panel-header">
+            <div className="tools-panel-icon">
+              <Icon size={22} />
+            </div>
 
             <div>
-              <h2
-                style={{
-                  margin:
-                    0,
-                }}
-              >
-                {
-                  current[
-                    1
-                  ]
-                }
-              </h2>
-
-              <p
-                style={{
-                  margin:
-                    "4px 0 0",
-                  opacity:
-                    0.6,
-                }}
-              >
-                {
-                  current[
-                    2
-                  ]
-                }
-              </p>
+              <h2>{current[1]}</h2>
+              <p>{current[2]}</p>
             </div>
           </div>
 
-          {active ===
-          "camera" ? (
-            <div
-              style={{
-                display:
-                  "grid",
-                gap: 12,
-              }}
-            >
+          {active === "camera" ? (
+            <div className="tools-camera">
               <video
-                ref={
-                  videoRef
-                }
+                ref={videoRef}
                 muted
                 playsInline
-                style={{
-                  width:
-                    "100%",
-                  maxHeight:
-                    420,
-                  objectFit:
-                    "contain",
-                  borderRadius:
-                    16,
-                  background:
-                    "#09090b",
-                }}
+                className="tools-camera-video"
               />
 
-              <canvas
-                ref={
-                  canvasRef
-                }
-                style={{
-                  display:
-                    "none",
-                }}
-              />
+              <canvas ref={canvasRef} style={{ display: "none" }} />
 
-              <div
-                style={{
-                  display:
-                    "flex",
-                  gap: 10,
-                }}
-              >
+              <div className="tools-actions">
                 <button
-                  onClick={() =>
-                    void enableCamera()
-                  }
-                  style={
-                    button
-                  }
+                  type="button"
+                  onClick={() => void enableCamera()}
+                  className="tools-btn-primary"
                 >
-                  Enable
-                  camera
+                  Enable camera
                 </button>
 
                 <button
-                  onClick={() =>
-                    void captureCamera()
-                  }
-                  disabled={
-                    !cameraOn ||
-                    loading
-                  }
-                  style={
-                    buttonSecondary
-                  }
+                  type="button"
+                  onClick={() => void captureCamera()}
+                  disabled={!cameraOn || loading}
+                  className="tools-btn-secondary"
                 >
-                  Capture &
-                  solve
+                  Capture & solve
                 </button>
               </div>
             </div>
           ) : (
             <>
               <textarea
-                value={
-                  input
-                }
-                onChange={(
-                  event
-                ) =>
-                  setInput(
-                    event
-                      .target
-                      .value
-                  )
-                }
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
                 rows={9}
                 placeholder="Enter your topic, notes, question, or source text…"
-                style={
-                  textarea
-                }
+                className="tools-textarea"
               />
 
-              <div
-                style={{
-                  display:
-                    "flex",
-                  gap: 10,
-                  marginTop:
-                    12,
-                  flexWrap:
-                    "wrap",
-                }}
-              >
+              <div className="tools-actions">
                 <button
-                  onClick={() =>
-                    void runTool(
-                      active
-                    )
-                  }
-                  disabled={
-                    loading ||
-                    !input.trim()
-                  }
-                  style={
-                    button
-                  }
+                  type="button"
+                  onClick={() => void runTool(active)}
+                  disabled={loading || !input.trim()}
+                  className="tools-btn-primary"
                 >
-                  {loading
-                    ? "Working…"
-                    : "Run ScholarAI"}
+                  {loading ? "Working…" : "Run ScholarAI"}
                 </button>
 
-                {active ===
-                  "voice" && (
+                {active === "voice" && (
                   <button
-                    onClick={() =>
-                      void startVoice()
-                    }
-                    style={
-                      buttonSecondary
-                    }
+                    type="button"
+                    onClick={() => void startVoice()}
+                    className="tools-btn-secondary"
                   >
-                    🎙 Start
-                    listening
+                    <Mic size={15} /> Start listening
                   </button>
                 )}
 
-{result !== null &&
-  result !== undefined &&
-  active === "voice" && (
-    <button
-      onClick={speakResult}
-      style={buttonSecondary}
-    >
-      🔊 Read aloud
-    </button>
-  )}
+                {result !== null &&
+                  result !== undefined &&
+                  active === "voice" && (
+                    <button
+                      type="button"
+                      onClick={speakResult}
+                      className="tools-btn-secondary"
+                    >
+                      Read aloud
+                    </button>
+                  )}
 
                 <button
-                  onClick={() =>
-                    void loadUsage()
-                  }
-                  style={
-                    buttonSecondary
-                  }
+                  type="button"
+                  onClick={() => void loadUsage()}
+                  className="tools-btn-secondary"
                 >
-                  Refresh
-                  usage
+                  Refresh usage
                 </button>
               </div>
             </>
           )}
 
-          {error && (
-            <div
-              style={
-                errorBox
-              }
-            >
-              {error}
-            </div>
-          )}
+          {error && <div className="tools-error">{error}</div>}
 
-          {result !==
-            null && (
-            <div
-              style={{
-                marginTop:
-                  20,
-              }}
-            >
-              <h3
-                style={{
-                  marginBottom:
-                    10,
-                }}
-              >
-                Result
-              </h3>
-
-              <pre
-                style={
-                  resultBox
-                }
-              >
-                {typeof result ===
-                "string"
+          {result !== null && (
+            <div className="tools-result">
+              <h3>Result</h3>
+              <pre className="tools-result-box">
+                {typeof result === "string"
                   ? result
-                  : JSON.stringify(
-                      result,
-                      null,
-                      2
-                    )}
+                  : JSON.stringify(result, null, 2)}
               </pre>
             </div>
           )}
         </section>
-      </div>
+      </section>
+
+      <footer className="footer">
+        <span>ScholarAI</span>
+        <span>Learning Lab · powered by Gemini</span>
+      </footer>
     </main>
   );
 }
-
-const panel:
-  React.CSSProperties = {
-  background:
-    "#111113",
-  border:
-    "1px solid #27272a",
-  borderRadius: 20,
-  padding: 20,
-};
-
-const card:
-  React.CSSProperties = {
-  background:
-    "#111113",
-  color:
-    "#f4f4f5",
-  border:
-    "1px solid #27272a",
-  borderRadius: 16,
-  padding: 16,
-};
-
-const textarea:
-  React.CSSProperties = {
-  width: "100%",
-  boxSizing:
-    "border-box",
-  borderRadius: 14,
-  border:
-    "1px solid #3f3f46",
-  background:
-    "#18181b",
-  color: "#fff",
-  padding: 14,
-  resize:
-    "vertical",
-};
-
-const button:
-  React.CSSProperties = {
-  border: 0,
-  borderRadius: 12,
-  background: "#fff",
-  color:
-    "#09090b",
-  fontWeight: 700,
-  padding:
-    "12px 16px",
-  cursor:
-    "pointer",
-};
-
-const buttonSecondary:
-  React.CSSProperties = {
-  border:
-    "1px solid #3f3f46",
-  borderRadius: 12,
-  background:
-    "#18181b",
-  color: "#fff",
-  fontWeight: 600,
-  padding:
-    "12px 16px",
-  cursor:
-    "pointer",
-};
-
-const resultBox:
-  React.CSSProperties = {
-  whiteSpace:
-    "pre-wrap",
-  overflowX:
-    "auto",
-  background:
-    "#0d0d0f",
-  border:
-    "1px solid #27272a",
-  borderRadius: 14,
-  padding: 16,
-  lineHeight: 1.5,
-};
-
-const errorBox:
-  React.CSSProperties = {
-  marginTop: 16,
-  padding: 14,
-  borderRadius: 12,
-  border:
-    "1px solid #7f1d1d",
-  background:
-    "#2a1010",
-  color:
-    "#fecaca",
-};
-
-const usageBadge:
-  React.CSSProperties = {
-  display:
-    "inline-block",
-  padding:
-    "8px 10px",
-  borderRadius:
-    999,
-  background:
-    "#18181b",
-  border:
-    "1px solid #27272a",
-  marginBottom:
-    10,
-};

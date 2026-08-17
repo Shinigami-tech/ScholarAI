@@ -1,8 +1,131 @@
 "use client";
+
 import { useState } from "react";
-export default function LoginPage(){
- const [mode,setMode]=useState<"login"|"signup">("login"); const [email,setEmail]=useState(""); const [password,setPassword]=useState(""); const [loading,setLoading]=useState(false); const [message,setMessage]=useState("");
- async function submit(e:React.FormEvent){e.preventDefault();setLoading(true);setMessage("");try{const res=await fetch(`/api/auth/${mode}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,password})});const data=await res.json();if(!res.ok)throw new Error(data.error||"Authentication failed.");if(data.authenticated)window.location.href="/";else setMessage("Account created. Check your email to confirm the account.");}catch(err){setMessage(err instanceof Error?err.message:"Authentication failed.");}finally{setLoading(false);}}
- return <main style={{minHeight:"100vh",display:"grid",placeItems:"center",padding:24,background:"#09090b",color:"#f4f4f5"}}><form onSubmit={submit} style={{width:"min(420px,100%)",padding:28,border:"1px solid #27272a",borderRadius:20,background:"#111113"}}><div style={{marginBottom:24}}><div style={{fontSize:14,opacity:.65}}>ScholarAI</div><h1 style={{fontSize:32,margin:"8px 0"}}>{mode==="login"?"Welcome back":"Create your account"}</h1><p style={{margin:0,opacity:.7}}>Your learning workspace, powered by AI.</p></div><label style={labelStyle}>Email<input value={email} onChange={e=>setEmail(e.target.value)} type="email" required style={inputStyle}/></label><label style={labelStyle}>Password<input value={password} onChange={e=>setPassword(e.target.value)} type="password" minLength={6} required style={inputStyle}/></label><button disabled={loading} style={buttonStyle}>{loading?"Please wait…":mode==="login"?"Sign in":"Create account"}</button><button type="button" onClick={()=>{setMode(mode==="login"?"signup":"login");setMessage("")}} style={{...buttonStyle,marginTop:10,background:"transparent",border:"1px solid #3f3f46",color:"#fff"}}>{mode==="login"?"Create an account":"I already have an account"}</button>{message&&<p style={{marginTop:16,color:"#fbbf24"}}>{message}</p>}</form></main>
+
+export default function LoginPage() {
+  const [mode, setMode] = useState<"login" | "signup">("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState("");
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setLoading(true);
+    setMessage("");
+
+    try {
+      const res = await fetch(`/api/auth/${mode}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "Authentication failed.");
+      }
+
+      if (data.authenticated) {
+        window.location.href = "/";
+      } else {
+        setMessage("Account created. Check your email to confirm the account.");
+      }
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Authentication failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <main className="app-shell">
+      <div className="grid-background" />
+      <div className="ambient ambient-one" />
+      <div className="ambient ambient-two" />
+
+      <div className="auth-wrap">
+        <a href="/" className="auth-back">
+          ← ScholarAI
+        </a>
+
+        <form onSubmit={submit} className="auth-card">
+          <div className="auth-mark">S</div>
+
+          <h1 className="auth-title">
+            {mode === "login" ? "Welcome back" : "Create your account"}
+          </h1>
+
+          <p className="auth-subtitle">
+            Your learning workspace, powered by AI. No GitHub or third-party
+            account needed — just an email and a password.
+          </p>
+
+          <div className="auth-tabs" role="tablist">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "login"}
+              className={`auth-tab${mode === "login" ? " auth-tab-active" : ""}`}
+              onClick={() => {
+                setMode("login");
+                setMessage("");
+              }}
+            >
+              Sign in
+            </button>
+
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "signup"}
+              className={`auth-tab${mode === "signup" ? " auth-tab-active" : ""}`}
+              onClick={() => {
+                setMode("signup");
+                setMessage("");
+              }}
+            >
+              Create account
+            </button>
+          </div>
+
+          <label className="auth-field">
+            <span>Email</span>
+            <input
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              type="email"
+              autoComplete="email"
+              required
+            />
+          </label>
+
+          <label className="auth-field">
+            <span>Password</span>
+            <input
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              type="password"
+              autoComplete={
+                mode === "login" ? "current-password" : "new-password"
+              }
+              minLength={6}
+              required
+            />
+          </label>
+
+          <button disabled={loading} className="auth-submit">
+            {loading
+              ? "Please wait…"
+              : mode === "login"
+                ? "Sign in"
+                : "Create account"}
+          </button>
+
+          {message && <p className="auth-message">{message}</p>}
+        </form>
+      </div>
+    </main>
+  );
 }
-const labelStyle:React.CSSProperties={display:"grid",gap:8,marginBottom:16}; const inputStyle:React.CSSProperties={width:"100%",boxSizing:"border-box",borderRadius:12,border:"1px solid #3f3f46",background:"#18181b",color:"#fff",padding:"12px 14px"}; const buttonStyle:React.CSSProperties={width:"100%",border:0,borderRadius:12,padding:"13px 16px",background:"#fff",color:"#09090b",fontWeight:700,cursor:"pointer"};

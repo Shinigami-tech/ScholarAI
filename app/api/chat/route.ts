@@ -7,6 +7,13 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+// Same reasoning as /api/analyze: without this Vercel caps the function
+// at the default 10s and kills it silently, which shows up to users as
+// Drake randomly failing instead of just taking a bit longer.
+export const maxDuration = 60;
+
+const REQUEST_DEADLINE_MS = 50 * 1000;
+
 type DocumentContext = {
   fileName?: string;
   title?: string;
@@ -475,7 +482,8 @@ Remember:
 
 async function generateWithRetry(
   ai: GoogleGenAI,
-  prompt: string
+  prompt: string,
+  deadline: number
 ) {
   let lastError: unknown;
 
@@ -516,10 +524,20 @@ async function generateWithRetry(
         throw error;
       }
 
-      await sleep(
+      const delay =
         RETRY_BASE_DELAY *
-          Math.pow(2, attempt - 1)
-      );
+        Math.pow(2, attempt - 1);
+
+      // Fail fast with a clean message instead of sleeping past the
+      // point where Vercel would kill the function anyway.
+      if (
+        Date.now() + delay >
+        deadline
+      ) {
+        throw error;
+      }
+
+      await sleep(delay);
     }
   }
 
@@ -577,6 +595,10 @@ function getHttpStatus(
 export async function POST(
   request: Request
 ) {
+  const deadline =
+    Date.now() +
+    REQUEST_DEADLINE_MS;
+
   try {
     const usageUser =
       await requireUserForApi();
@@ -736,7 +758,8 @@ export async function POST(
     const response =
       await generateWithRetry(
         ai,
-        prompt
+        prompt,
+        deadline
       );
 
     const answer =
