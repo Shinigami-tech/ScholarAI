@@ -71,6 +71,22 @@ function getUsageErrorCode(error: unknown): string | undefined {
   }
   return (error as UsageError).code;
 }
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+// Same detection as /api/analyze and /api/chat: Gemini being overloaded
+// (503 UNAVAILABLE / "high demand") is a routine, expected upstream
+// condition, not a ScholarAI bug — surface it as such instead of the
+// generic 500 fallback below, which used to hide this behind an unhelpful
+// "couldn't complete this right now" for every Learning Lab tool.
+function isProviderOverloaded(error: unknown) {
+  const message = getErrorMessage(error).toLowerCase();
+  return message.includes("unavailable") || message.includes("high demand") || message.includes("overloaded") || message.includes('"code":503');
+}
+function isTimeoutError(error: unknown) {
+  const message = getErrorMessage(error).toLowerCase();
+  return message.includes("taking too long to respond") || message.includes("taking longer than usual") || message.includes("timed out");
+}
 export async function POST(request: Request) {
   const deadline = Date.now() + REQUEST_DEADLINE_MS;
   try {
@@ -149,6 +165,28 @@ export async function POST(request: Request) {
     // developers, not something to dump in the UI. Log the real error
     // server-side and show the user one clean sentence instead.
     console.error("ScholarAI feature error:", error);
+    if (isProviderOverloaded(error)) {
+      return NextResponse.json(
+        {
+          error: "Google's Gemini AI is temporarily overloaded with requests right now — this isn't a bug in ScholarAI. Please try again in a minute.",
+          retryable: true,
+        },
+        {
+          status: 503,
+        },
+      );
+    }
+    if (isTimeoutError(error)) {
+      return NextResponse.json(
+        {
+          error: "Gemini is responding slower than usual and this request ran out of time. Please try again — it usually succeeds on a retry.",
+          retryable: true,
+        },
+        {
+          status: 503,
+        },
+      );
+    }
     return NextResponse.json(
       {
         error: "ScholarAI couldn't complete this right now. Please try again in a moment.",
