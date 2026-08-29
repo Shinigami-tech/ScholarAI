@@ -2,7 +2,15 @@ import { GoogleGenAI } from "@google/genai";
 
 export type GeminiTask = "light" | "reasoning";
 
-const DEFAULT_LIGHT_MODEL = "gemini-flash-latest";
+// Light tasks (Learning Lab's study/flashcards/quiz/chat/etc.) want the
+// fastest model available. IMPORTANT: unlike "flash", there is no generic
+// "gemini-flash-lite-latest" rolling alias published by Google — that
+// name does not exist and was causing every single "light" Learning Lab
+// call to fail outright (this is why Learning Lab stopped working after
+// the previous fix). Use the current stable dated Flash-Lite model ID
+// instead. The isModelNotFound fallback below still protects us if this
+// specific ID is retired in a future Gemini generation.
+const DEFAULT_LIGHT_MODEL = "gemini-3.5-flash-lite";
 const DEFAULT_REASONING_MODEL = "gemini-flash-latest";
 
 export function getGeminiClient() {
@@ -36,6 +44,18 @@ function isDailyQuotaExhausted(error: unknown) {
     message.includes("resource_exhausted") ||
     (message.includes("429") && message.includes("quota")) ||
     message.includes("free_tier_requests")
+  );
+}
+
+// Distinguishes "this model name doesn't exist / isn't available" (404 /
+// NOT_FOUND from Gemini) from ordinary transient failures, so we can swap
+// to a known-good model instead of retrying the same bad name four times.
+function isModelNotFound(error: unknown) {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return (
+    message.includes("not_found") ||
+    message.includes("404") ||
+    (message.includes("model") && message.includes("not found"))
   );
 }
 
@@ -94,7 +114,7 @@ export async function generateText(input: {
   deadline?: number;
 }) {
   const ai = getGeminiClient();
-  const model = getGeminiModel(input.task);
+  let model = getGeminiModel(input.task);
   let last: unknown;
 
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -123,9 +143,20 @@ export async function generateText(input: {
         throw quotaError;
       }
 
+      // If the light-tier alias (gemini-flash-lite-latest) turns out not to
+      // exist on this account/region, fall back immediately to the
+      // proven-working gemini-flash-latest instead of failing every
+      // "light" request.
+      if (isModelNotFound(error) && model !== DEFAULT_REASONING_MODEL) {
+        model = DEFAULT_REASONING_MODEL;
+        continue;
+      }
+
       if (!isRetryable(error) || attempt === 3) throw error;
 
-      const delay = 1000 * Math.pow(2, attempt);
+      // Jitter spreads retries out instead of every stalled request
+      // hammering Gemini again at the exact same moment.
+      const delay = 1000 * Math.pow(2, attempt) + Math.random() * 400;
 
       if (input.deadline && Date.now() + delay > input.deadline) {
         throw error;

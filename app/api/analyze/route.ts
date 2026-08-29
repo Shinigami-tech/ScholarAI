@@ -1,74 +1,51 @@
-import {
-  GoogleGenAI,
-  createPartFromUri,
-  createPartFromBase64,
-} from "@google/genai";
-
-import {
-  requireUserForApi,
-  consumeUsage,
-} from "@/lib/usage";
-
+import { GoogleGenAI, createPartFromUri, createPartFromBase64 } from "@google/genai";
+import { requireUserForApi, consumeUsage } from "@/lib/usage";
 import { randomUUID } from "crypto";
 import { createWriteStream } from "fs";
 import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
 import { Readable } from "stream";
-
-import type {
-  ReadableStream as NodeReadableStream,
-} from "stream/web";
-
+import type { ReadableStream as NodeReadableStream } from "stream/web";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
 // Vercel kills the function at the plan's execution limit regardless of
 // what our own retry/poll logic is doing. Without this, the platform
 // silently cuts requests off after the default 10s, which is what caused
 // "still loading forever then errors out" for anything but tiny files.
 // 60s is the max the Hobby plan allows; Pro/Enterprise can go higher.
 export const maxDuration = 60;
-
 // Deliberately much tighter than maxDuration. A long deadline (e.g. 50s)
 // means a user staring at a spinner during a Gemini slowdown waits nearly
 // a minute before finding out it failed — worse than a quick, honest
 // "try again." 22s trades a slightly higher fail rate on unusually large
 // documents for failing fast on the common case (an overloaded/slow call).
-const REQUEST_DEADLINE_MS = 22 * 1000;
-
-const GENERAL_MAX_FILE_SIZE =
-  1024 * 1024 * 1024;
-
-const PDF_MAX_FILE_SIZE =
-  50 * 1024 * 1024;
-
+const REQUEST_DEADLINE_MS = 45 * 1000;
+const GENERAL_MAX_FILE_SIZE = 1024 * 1024 * 1024;
+const PDF_MAX_FILE_SIZE = 50 * 1024 * 1024;
 // Below this size, send the file inline in the same request instead of
 // going through Gemini's Files API (upload, then poll files.get every
 // 2s until it reports ACTIVE). That upload+poll round trip was adding
 // several extra seconds to EVERY analysis, even for a one-page PDF —
 // this was the main cause of "why does a small document take so long."
 // 15MB stays safely under Gemini's inline request size ceiling.
-const INLINE_MAX_FILE_SIZE =
-  15 * 1024 * 1024;
-
+const INLINE_MAX_FILE_SIZE = 15 * 1024 * 1024;
 const MAX_FILE_NAME_LENGTH = 255;
-
-const MODEL =
-  process.env.GEMINI_MODEL?.trim() ||
-  "gemini-flash-latest";
-
+const MODEL = process.env.GEMINI_MODEL?.trim() || "gemini-flash-latest";
 const MAX_PROCESSING_ATTEMPTS = 120;
 const PROCESSING_INTERVAL_MS = 2000;
-
 const RETRY_ATTEMPTS = 5;
-const RETRY_BASE_DELAY = 1500;
-
+// Was 1500ms. Exponential backoff between 5 attempts at a 1500ms base
+// summed to 22.5s of pure waiting before the last attempt even started —
+// out of a 45s deadline. That's most of the budget spent sleeping
+// instead of actually calling Gemini, which is why requests were timing
+// out even when Gemini was only moderately slow. 500ms base leaves far
+// more of the deadline for real attempts.
+const RETRY_BASE_DELAY = 500;
 type Flashcard = {
   question: string;
   answer: string;
 };
-
 type AnalysisResult = {
   title: string;
   summary: string[];
@@ -76,63 +53,42 @@ type AnalysisResult = {
   simpleExplanation: string;
   flashcards: Flashcard[];
 };
-
 type UsageError = Error & {
   code?: string;
 };
-
 const ALLOWED_MIME_TYPES = new Set([
   "application/pdf",
-
   "application/msword",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-
   "application/vnd.ms-powerpoint",
   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-
   "application/vnd.ms-excel",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-
   "text/plain",
   "text/markdown",
   "text/csv",
   "text/html",
   "text/xml",
   "application/rtf",
-
   "application/json",
-
   "image/png",
   "image/jpeg",
   "image/webp",
   "image/bmp",
-
   "video/mp4",
   "video/mpeg",
   "video/quicktime",
   "video/webm",
 ]);
-
 function sleep(ms: number) {
-  return new Promise<void>((resolve) =>
-    setTimeout(resolve, ms)
-  );
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
-
-function normalizeLanguage(
-  language: string
-) {
-  const value =
-    language?.trim().toLowerCase();
-
+function normalizeLanguage(language: string) {
+  const value = language?.trim().toLowerCase();
   if (!value) {
     return "English";
   }
-
-  const languageMap: Record<
-    string,
-    string
-  > = {
+  const languageMap: Record<string, string> = {
     en: "English",
     ru: "Russian",
     ko: "Korean",
@@ -166,162 +122,89 @@ function normalizeLanguage(
     uz: "Uzbek",
     ky: "Kyrgyz",
   };
-
-  return (
-    languageMap[value] ||
-    language
-  );
+  return languageMap[value] || language;
 }
-
-function sanitizeFileName(
-  fileName: string
-) {
+function sanitizeFileName(fileName: string) {
   return fileName
-    .replace(
-      /[<>:"/\\|?*\x00-\x1F]/g,
-      "_"
-    )
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(
-      0,
-      MAX_FILE_NAME_LENGTH
-    );
+    .slice(0, MAX_FILE_NAME_LENGTH);
 }
-
-function isPdf(
-  mimeType: string
-) {
-  return (
-    mimeType ===
-    "application/pdf"
-  );
+function isPdf(mimeType: string) {
+  return mimeType === "application/pdf";
 }
-
-function getMaxFileSize(
-  mimeType: string
-) {
-  return isPdf(mimeType)
-    ? PDF_MAX_FILE_SIZE
-    : GENERAL_MAX_FILE_SIZE;
+function getMaxFileSize(mimeType: string) {
+  return isPdf(mimeType) ? PDF_MAX_FILE_SIZE : GENERAL_MAX_FILE_SIZE;
 }
-
-function formatBytes(
-  bytes: number
-) {
+function formatBytes(bytes: number) {
   if (bytes < 1024) {
     return `${bytes} B`;
   }
-
-  if (
-    bytes <
-    1024 * 1024
-  ) {
-    return `${(
-      bytes / 1024
-    ).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
   }
-
-  if (
-    bytes <
-    1024 * 1024 * 1024
-  ) {
-    return `${(
-      bytes /
-      (1024 * 1024)
-    ).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
-
-  return `${(
-    bytes /
-    (1024 * 1024 * 1024)
-  ).toFixed(2)} GB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
-
-function getErrorMessage(
-  error: unknown
-) {
-  if (
-    error instanceof Error
-  ) {
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) {
     return error.message;
   }
-
   return String(error);
 }
-
-function getUsageErrorCode(
-  error: unknown
-): string | undefined {
-  if (
-    !(error instanceof Error)
-  ) {
+function getUsageErrorCode(error: unknown): string | undefined {
+  if (!(error instanceof Error)) {
     return undefined;
   }
-
-  const usageError =
-    error as UsageError;
-
+  const usageError = error as UsageError;
   return usageError.code;
 }
-
-function isRetryableError(
-  error: unknown
-) {
-  const message =
-    getErrorMessage(
-      error
-    ).toLowerCase();
-
-  return (
-    message.includes("429") ||
-    message.includes("500") ||
-    message.includes("502") ||
-    message.includes("503") ||
-    message.includes("504") ||
-    message.includes(
-      "resource exhausted"
-    ) ||
-    message.includes(
-      "temporarily unavailable"
-    ) ||
-    message.includes(
-      "timeout"
-    ) ||
-    message.includes(
-      "deadline"
-    ) ||
-    message.includes(
-      "overloaded"
-    )
-  );
+function isRetryableError(error: unknown) {
+  const message = getErrorMessage(error).toLowerCase();
+  return message.includes("429") || message.includes("500") || message.includes("502") || message.includes("503") || message.includes("504") || message.includes("resource exhausted") || message.includes("temporarily unavailable") || message.includes("timeout") || message.includes("deadline") || message.includes("overloaded");
 }
-
 // A daily quota exhausted error (RESOURCE_EXHAUSTED / free_tier_requests)
 // won't fix itself in the next few seconds — Google itself asks for a
 // 45s+ wait. Retrying it like a transient 503 just burns the request's
 // time budget for nothing, so we treat it as non-retryable here and let
 // it surface immediately with a clear message.
-function isDailyQuotaExhausted(
-  error: unknown
-) {
-  const message =
-    getErrorMessage(
-      error
-    ).toLowerCase();
-
-  return (
-    message.includes(
-      "resource_exhausted"
-    ) ||
-    (message.includes("429") &&
-      message.includes("quota")) ||
-    message.includes(
-      "free_tier_requests"
-    )
-  );
+function isDailyQuotaExhausted(error: unknown) {
+  const message = getErrorMessage(error).toLowerCase();
+  return message.includes("resource_exhausted") || (message.includes("429") && message.includes("quota")) || message.includes("free_tier_requests");
 }
-
+// Google's own model being overloaded (503 UNAVAILABLE / "high demand") is
+// the single most common cause of analysis failures in production — it has
+// nothing to do with our code, but the old code returned a generic
+// "ScholarAI could not analyze this document." for it, identical to a real
+// bug. Users (and whoever is debugging this) had no way to tell "wait a
+// minute and retry" apart from "something is actually broken." Detect it
+// explicitly so the message we send back says what's really going on.
+function isProviderOverloaded(error: unknown) {
+  const message = getErrorMessage(error).toLowerCase();
+  return message.includes("unavailable") || message.includes("high demand") || message.includes("overloaded") || message.includes('"code":503');
+}
+function isTimeoutError(error: unknown) {
+  const message = getErrorMessage(error).toLowerCase();
+  return message.includes("taking too long to respond") || message.includes("taking longer than usual") || message.includes("timed out");
+}
+// The single user-facing sentence for a failure. Kept separate from
+// getHttpStatus so the two can't drift out of sync on which bucket an
+// error falls into.
+function getUserFacingError(error: unknown) {
+  if (isDailyQuotaExhausted(error)) {
+    return "ScholarAI's daily AI usage limit has been reached. Please try again later.";
+  }
+  if (isProviderOverloaded(error)) {
+    return "Google's Gemini AI is temporarily overloaded with requests right now — this isn't a bug in ScholarAI. Please try again in a minute.";
+  }
+  if (isTimeoutError(error)) {
+    return "Gemini is responding slower than usual and this request ran out of time. Please try again — it usually succeeds on a retry.";
+  }
+  return "ScholarAI could not analyze this document.";
+}
 // A single Gemini call has no timeout of its own — if the model is
 // overloaded it can hang on one in-flight call for the whole remaining
 // budget. The old deadline check only ran BETWEEN retry attempts, so a
@@ -329,136 +212,59 @@ function isDailyQuotaExhausted(
 // own 60s limit (an opaque platform timeout) instead of failing cleanly
 // through our own error handling. Racing every attempt against the
 // remaining deadline closes that gap.
-function withTimeout<T>(
-  operation: () => Promise<T>,
-  deadline?: number
-): Promise<T> {
+function withTimeout<T>(operation: () => Promise<T>, deadline?: number): Promise<T> {
   if (!deadline) {
     return operation();
   }
-
-  const remaining =
-    deadline - Date.now();
-
+  const remaining = deadline - Date.now();
   if (remaining <= 0) {
-    return Promise.reject(
-      new Error(
-        "Gemini is taking too long to respond — please try again in a moment."
-      )
-    );
+    return Promise.reject(new Error("Gemini is taking too long to respond — please try again in a moment."));
   }
-
-  return new Promise<T>(
-    (resolve, reject) => {
-      const timeoutId =
-        setTimeout(() => {
-          reject(
-            new Error(
-              "Gemini is taking too long to respond — please try again in a moment."
-            )
-          );
-        }, remaining);
-
-      operation().then(
-        (value) => {
-          clearTimeout(
-            timeoutId
-          );
-          resolve(value);
-        },
-        (error) => {
-          clearTimeout(
-            timeoutId
-          );
-          reject(error);
-        }
-      );
-    }
-  );
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(new Error("Gemini is taking too long to respond — please try again in a moment."));
+    }, remaining);
+    operation().then(
+      (value) => {
+        clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeoutId);
+        reject(error);
+      },
+    );
+  });
 }
-
-async function withRetry<T>(
-  operation: () => Promise<T>,
-  deadline?: number
-): Promise<T> {
+async function withRetry<T>(operation: () => Promise<T>, deadline?: number): Promise<T> {
   let lastError: unknown;
-
-  for (
-    let attempt = 1;
-    attempt <=
-    RETRY_ATTEMPTS;
-    attempt++
-  ) {
+  for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
     try {
-      return await withTimeout(
-        operation,
-        deadline
-      );
+      return await withTimeout(operation, deadline);
     } catch (error) {
       lastError = error;
-
-      if (
-        isDailyQuotaExhausted(
-          error
-        ) ||
-        !isRetryableError(
-          error
-        ) ||
-        attempt ===
-          RETRY_ATTEMPTS
-      ) {
+      if (isDailyQuotaExhausted(error) || !isRetryableError(error) || attempt === RETRY_ATTEMPTS) {
         throw error;
       }
-
-      const delay =
-        RETRY_BASE_DELAY *
-        Math.pow(
-          2,
-          attempt - 1
-        );
-
+      const delay = RETRY_BASE_DELAY * Math.pow(2, attempt - 1) + Math.random() * 400;
       // Don't sleep past the request deadline just to throw anyway —
       // fail now with a clear message instead of letting Vercel kill
       // the function mid-sleep with an opaque platform timeout.
-      if (
-        deadline &&
-        Date.now() + delay >
-          deadline
-      ) {
+      if (deadline && Date.now() + delay > deadline) {
         throw error;
       }
-
       await sleep(delay);
     }
   }
-
   throw lastError;
 }
-
-async function saveRequestBodyToFile(
-  request: Request,
-  filePath: string,
-  maxFileSize: number
-) {
+async function saveRequestBodyToFile(request: Request, filePath: string, maxFileSize: number) {
   if (!request.body) {
-    throw new Error(
-      "Request body is empty."
-    );
+    throw new Error("Request body is empty.");
   }
-
-  const webStream =
-    request.body as unknown as NodeReadableStream<Uint8Array>;
-
-  const nodeStream =
-    Readable.fromWeb(
-      webStream
-    );
-
-  const writeStream =
-    createWriteStream(
-      filePath
-    );
-
+  const webStream = request.body as unknown as NodeReadableStream<Uint8Array>;
+  const nodeStream = Readable.fromWeb(webStream);
+  const writeStream = createWriteStream(filePath);
   // Attach exactly ONE "error" listener for the whole life of this
   // stream and race against it below. The previous version registered
   // a fresh once("error", ...) listener on every backpressure/drain
@@ -466,248 +272,105 @@ async function saveRequestBodyToFile(
   // uploads with lots of backpressure would pile up 10+ listeners and
   // trigger MaxListenersExceededWarning, adding real overhead exactly
   // on the big files people complained were slow.
-  let streamErrorReject:
-    | ((error: unknown) => void)
-    | null = null;
-
-  const streamErrorPromise =
-    new Promise<never>(
-      (_, reject) => {
-        streamErrorReject =
-          reject;
-      }
-    );
-
-  writeStream.once(
-    "error",
-    (error) => {
-      streamErrorReject?.(
-        error
-      );
-    }
-  );
-
+  let streamErrorReject: ((error: unknown) => void) | null = null;
+  const streamErrorPromise = new Promise<never>((_, reject) => {
+    streamErrorReject = reject;
+  });
+  writeStream.once("error", (error) => {
+    streamErrorReject?.(error);
+  });
   let totalBytes = 0;
-
   try {
-    for await (
-      const chunk
-      of nodeStream
-    ) {
-      const buffer =
-        Buffer.isBuffer(
-          chunk
-        )
-          ? chunk
-          : Buffer.from(
-              chunk
-            );
-
-      totalBytes +=
-        buffer.length;
-
-      if (
-        totalBytes >
-        maxFileSize
-      ) {
-        throw new Error(
-          `The uploaded file is larger than the allowed limit of ${formatBytes(
-            maxFileSize
-          )}.`
-        );
+    for await (const chunk of nodeStream) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += buffer.length;
+      if (totalBytes > maxFileSize) {
+        throw new Error(`The uploaded file is larger than the allowed limit of ${formatBytes(maxFileSize)}.`);
       }
-
-      if (
-        !writeStream.write(
-          buffer
-        )
-      ) {
+      if (!writeStream.write(buffer)) {
         await Promise.race([
-          new Promise<void>(
-            (resolve) => {
-              writeStream.once(
-                "drain",
-                resolve
-              );
-            }
-          ),
+          new Promise<void>((resolve) => {
+            writeStream.once("drain", resolve);
+          }),
           streamErrorPromise,
         ]);
       }
     }
-
     await Promise.race([
-      new Promise<void>(
-        (resolve) => {
-          writeStream.once(
-            "finish",
-            resolve
-          );
-
-          writeStream.end();
-        }
-      ),
+      new Promise<void>((resolve) => {
+        writeStream.once("finish", resolve);
+        writeStream.end();
+      }),
       streamErrorPromise,
     ]);
-
     return totalBytes;
   } catch (error) {
     writeStream.destroy();
-
     try {
-      await fs.unlink(
-        filePath
-      );
+      await fs.unlink(filePath);
     } catch {
       // File may already be removed.
     }
-
     throw error;
   }
 }
-
 // For files small enough to inline, we already skip the disk entirely
 // (see the fast path in POST below) — this just accumulates the request
 // body straight into memory instead of streaming it to a temp file we'd
 // only turn around and read back. Bounded by maxFileSize so it can't run
 // away; callers only use this once Content-Length already told us the
 // upload is within INLINE_MAX_FILE_SIZE.
-async function readRequestBodyToBuffer(
-  request: Request,
-  maxFileSize: number
-): Promise<Buffer> {
+async function readRequestBodyToBuffer(request: Request, maxFileSize: number): Promise<Buffer> {
   if (!request.body) {
-    throw new Error(
-      "Request body is empty."
-    );
+    throw new Error("Request body is empty.");
   }
-
-  const webStream =
-    request.body as unknown as NodeReadableStream<Uint8Array>;
-
-  const nodeStream =
-    Readable.fromWeb(
-      webStream
-    );
-
+  const webStream = request.body as unknown as NodeReadableStream<Uint8Array>;
+  const nodeStream = Readable.fromWeb(webStream);
   const chunks: Buffer[] = [];
   let totalBytes = 0;
-
-  for await (
-    const chunk
-    of nodeStream
-  ) {
-    const buffer =
-      Buffer.isBuffer(
-        chunk
-      )
-        ? chunk
-        : Buffer.from(
-            chunk
-          );
-
-    totalBytes +=
-      buffer.length;
-
-    if (
-      totalBytes >
-      maxFileSize
-    ) {
-      throw new Error(
-        `The uploaded file is larger than the allowed limit of ${formatBytes(
-          maxFileSize
-        )}.`
-      );
+  for await (const chunk of nodeStream) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.length;
+    if (totalBytes > maxFileSize) {
+      throw new Error(`The uploaded file is larger than the allowed limit of ${formatBytes(maxFileSize)}.`);
     }
-
     chunks.push(buffer);
   }
-
-  return Buffer.concat(
-    chunks,
-    totalBytes
-  );
+  return Buffer.concat(chunks, totalBytes);
 }
-
-async function waitForFileProcessing(
-  ai: GoogleGenAI,
-  fileName: string,
-  deadline: number
-) {
-  for (
-    let attempt = 0;
-    attempt <
-    MAX_PROCESSING_ATTEMPTS;
-    attempt++
-  ) {
-    const file =
-      await withRetry(
-        () =>
-          ai.files.get({
-            name: fileName,
-          }),
-        deadline
-      );
-
-    const state =
-      String(
-        file.state || ""
-      ).toUpperCase();
-
-    if (
-      state === "ACTIVE"
-    ) {
+async function waitForFileProcessing(ai: GoogleGenAI, fileName: string, deadline: number) {
+  for (let attempt = 0; attempt < MAX_PROCESSING_ATTEMPTS; attempt++) {
+    const file = await withRetry(
+      () =>
+        ai.files.get({
+          name: fileName,
+        }),
+      deadline,
+    );
+    const state = String(file.state || "").toUpperCase();
+    if (state === "ACTIVE") {
       return file;
     }
-
-    if (
-      state === "FAILED"
-    ) {
-      throw new Error(
-        "Gemini failed to process the uploaded file."
-      );
+    if (state === "FAILED") {
+      throw new Error("Gemini failed to process the uploaded file.");
     }
-
     // Bail out early with a clear message instead of sleeping past the
     // point where Vercel is about to kill the function anyway.
-    if (
-      Date.now() +
-        PROCESSING_INTERVAL_MS >
-      deadline
-    ) {
-      throw new Error(
-        "Gemini is still processing this file and it's taking longer than usual — please try again in a moment."
-      );
+    if (Date.now() + PROCESSING_INTERVAL_MS > deadline) {
+      throw new Error("Gemini is still processing this file and it's taking longer than usual — please try again in a moment.");
     }
-
-    await sleep(
-      PROCESSING_INTERVAL_MS
-    );
+    await sleep(PROCESSING_INTERVAL_MS);
   }
-
-  throw new Error(
-    "Gemini file processing timed out after several minutes."
-  );
+  throw new Error("Gemini file processing timed out after several minutes.");
 }
-
-function buildPrompt(
-  language: string
-) {
-  const outputLanguage =
-    normalizeLanguage(
-      language
-    );
-
+function buildPrompt(language: string) {
+  const outputLanguage = normalizeLanguage(language);
   return `
 You are ScholarAI, an advanced academic intelligence system.
-
 Your task is to analyze the attached file accurately and produce a structured academic analysis.
-
 OUTPUT LANGUAGE:
 ${outputLanguage}
-
 CORE RULES:
-
 1. Return ONLY valid JSON.
 2. Do not write anything before or after the JSON.
 3. Do not use Markdown syntax inside JSON values.
@@ -725,43 +388,27 @@ CORE RULES:
 15. Do not create information merely to fill an expected structure.
 16. Use concise but useful academic language.
 17. The analysis should be understandable to a high-school student while remaining factually precise.
-
 TITLE:
-
 Create a clear title that represents the actual document.
-
 SUMMARY:
-
 Create 4 to 6 informative summary points.
 Each item should contain meaningful information from the document.
 Do not repeat the same point in different wording.
-
 KEY IDEAS:
-
 Create 5 to 8 of the most important ideas, facts, requirements, concepts or conclusions contained in the document.
-
 SIMPLE EXPLANATION:
-
 Explain the document as if you are teaching a high-school student.
 Explain difficult terminology in simple language when useful.
 Do not introduce facts that are not supported by the document.
-
 FLASHCARDS:
-
 Create up to 10 useful academic flashcards.
-
 Each flashcard must contain:
 - question
 - answer
-
 Flashcards must be based strictly on information actually present in the document.
-
 If the document does not contain enough information for 10 legitimate flashcards, return fewer.
-
 Do not fabricate flashcards.
-
 REQUIRED JSON STRUCTURE:
-
 {
   "title": "string",
   "summary": [
@@ -780,103 +427,36 @@ REQUIRED JSON STRUCTURE:
 }
 `.trim();
 }
-
-function cleanAnalysis(
-  parsed:
-    Partial<AnalysisResult>,
-  fileName: string
-): AnalysisResult {
-  const summary =
-    Array.isArray(
-      parsed.summary
-    )
-      ? parsed.summary
-          .filter(
-            (
-              item
-            ): item is string =>
-              typeof item ===
-              "string"
-          )
-          .map(
-            (item) =>
-              item.trim()
-          )
-          .filter(Boolean)
-          .slice(0, 8)
-      : [];
-
-  const keyIdeas =
-    Array.isArray(
-      parsed.keyIdeas
-    )
-      ? parsed.keyIdeas
-          .filter(
-            (
-              item
-            ): item is string =>
-              typeof item ===
-              "string"
-          )
-          .map(
-            (item) =>
-              item.trim()
-          )
-          .filter(Boolean)
-          .slice(0, 10)
-      : [];
-
-  const flashcards =
-    Array.isArray(
-      parsed.flashcards
-    )
-      ? parsed.flashcards
-          .filter(
-            (card) =>
-              card &&
-              typeof card.question ===
-                "string" &&
-              typeof card.answer ===
-                "string"
-          )
-          .map(
-            (card) => ({
-              question:
-                card.question.trim(),
-              answer:
-                card.answer.trim(),
-            })
-          )
-          .filter(
-            (card) =>
-              card.question &&
-              card.answer
-          )
-          .slice(0, 10)
-      : [];
-
-  const title =
-    typeof parsed.title ===
-      "string" &&
-    parsed.title.trim()
-      ? parsed.title.trim()
-      : fileName;
-
-  const simpleExplanation =
-    typeof parsed
-      .simpleExplanation ===
-    "string"
-      ? parsed.simpleExplanation.trim()
-      : "";
-
-  if (
-    !simpleExplanation
-  ) {
-    throw new Error(
-      "Gemini returned an incomplete analysis: simpleExplanation is missing."
-    );
+function cleanAnalysis(parsed: Partial<AnalysisResult>, fileName: string): AnalysisResult {
+  const summary = Array.isArray(parsed.summary)
+    ? parsed.summary
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .slice(0, 8)
+    : [];
+  const keyIdeas = Array.isArray(parsed.keyIdeas)
+    ? parsed.keyIdeas
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .slice(0, 10)
+    : [];
+  const flashcards = Array.isArray(parsed.flashcards)
+    ? parsed.flashcards
+        .filter((card) => card && typeof card.question === "string" && typeof card.answer === "string")
+        .map((card) => ({
+          question: card.question.trim(),
+          answer: card.answer.trim(),
+        }))
+        .filter((card) => card.question && card.answer)
+        .slice(0, 10)
+    : [];
+  const title = typeof parsed.title === "string" && parsed.title.trim() ? parsed.title.trim() : fileName;
+  const simpleExplanation = typeof parsed.simpleExplanation === "string" ? parsed.simpleExplanation.trim() : "";
+  if (!simpleExplanation) {
+    throw new Error("Gemini returned an incomplete analysis: simpleExplanation is missing.");
   }
-
   return {
     title,
     summary,
@@ -885,623 +465,283 @@ function cleanAnalysis(
     flashcards,
   };
 }
-
-async function getFilePart(
-  ai: GoogleGenAI,
-  filePath: string,
-  fileName: string,
-  mimeType: string,
-  fileSize: number,
-  deadline: number
-) {
-  if (
-    fileSize <=
-    INLINE_MAX_FILE_SIZE
-  ) {
-    const buffer =
-      await fs.readFile(
-        filePath
-      );
-
-    return createPartFromBase64(
-      buffer.toString(
-        "base64"
-      ),
-      mimeType
-    );
+async function getFilePart(ai: GoogleGenAI, filePath: string, fileName: string, mimeType: string, fileSize: number, deadline: number) {
+  if (fileSize <= INLINE_MAX_FILE_SIZE) {
+    const buffer = await fs.readFile(filePath);
+    return createPartFromBase64(buffer.toString("base64"), mimeType);
   }
-
   // Large files still need the Files API — inlining them would blow
   // past the request size limit.
-  const uploadedFile =
-    await withRetry(
-      () =>
-        ai.files.upload({
-          file: filePath,
-
-          config: {
-            displayName:
-              fileName,
-            mimeType,
-          },
-        }),
-      deadline
-    );
-
-  if (
-    !uploadedFile.name
-  ) {
-    throw new Error(
-      "Gemini did not return a file identifier after upload."
-    );
-  }
-
-  const activeFile =
-    await waitForFileProcessing(
-      ai,
-      uploadedFile.name,
-      deadline
-    );
-
-  if (
-    !activeFile.uri ||
-    !activeFile.mimeType
-  ) {
-    throw new Error(
-      "Gemini did not return a usable file URI."
-    );
-  }
-
-  return createPartFromUri(
-    activeFile.uri,
-    activeFile.mimeType
+  const uploadedFile = await withRetry(
+    () =>
+      ai.files.upload({
+        file: filePath,
+        config: {
+          displayName: fileName,
+          mimeType,
+        },
+      }),
+    deadline,
   );
+  if (!uploadedFile.name) {
+    throw new Error("Gemini did not return a file identifier after upload.");
+  }
+  const activeFile = await waitForFileProcessing(ai, uploadedFile.name, deadline);
+  if (!activeFile.uri || !activeFile.mimeType) {
+    throw new Error("Gemini did not return a usable file URI.");
+  }
+  return createPartFromUri(activeFile.uri, activeFile.mimeType);
 }
-
-async function runAnalysis(
-  ai: GoogleGenAI,
-  filePart: ReturnType<
-    typeof createPartFromBase64
-  >,
-  fileName: string,
-  language: string,
-  deadline: number
-): Promise<AnalysisResult> {
-  const response =
-    await withRetry(
-      () =>
-        ai.models.generateContent({
-          model: MODEL,
-
-          contents: [
-            {
-              role: "user",
-
-              parts: [
-                filePart,
-                {
-                  text: buildPrompt(
-                    language
-                  ),
-                },
-              ],
-            },
-          ],
-
-          config: {
-            responseMimeType:
-              "application/json",
-
-            responseSchema: {
-              type: "object",
-
-              properties: {
-                title: {
+async function runAnalysis(ai: GoogleGenAI, filePart: ReturnType<typeof createPartFromBase64>, fileName: string, language: string, deadline: number): Promise<AnalysisResult> {
+  const response = await withRetry(
+    () =>
+      ai.models.generateContent({
+        model: MODEL,
+        contents: [
+          {
+            role: "user",
+            parts: [
+              filePart,
+              {
+                text: buildPrompt(language),
+              },
+            ],
+          },
+        ],
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "object",
+            properties: {
+              title: {
+                type: "string",
+              },
+              summary: {
+                type: "array",
+                items: {
                   type: "string",
-                },
-
-                summary: {
-                  type: "array",
-
-                  items: {
-                    type: "string",
-                  },
-                },
-
-                keyIdeas: {
-                  type: "array",
-
-                  items: {
-                    type: "string",
-                  },
-                },
-
-                simpleExplanation: {
-                  type: "string",
-                },
-
-                flashcards: {
-                  type: "array",
-
-                  items: {
-                    type: "object",
-
-                    properties: {
-                      question: {
-                        type: "string",
-                      },
-
-                      answer: {
-                        type: "string",
-                      },
-                    },
-
-                    required: [
-                      "question",
-                      "answer",
-                    ],
-                  },
                 },
               },
-
-              required: [
-                "title",
-                "summary",
-                "keyIdeas",
-                "simpleExplanation",
-                "flashcards",
-              ],
+              keyIdeas: {
+                type: "array",
+                items: {
+                  type: "string",
+                },
+              },
+              simpleExplanation: {
+                type: "string",
+              },
+              flashcards: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    question: {
+                      type: "string",
+                    },
+                    answer: {
+                      type: "string",
+                    },
+                  },
+                  required: ["question", "answer"],
+                },
+              },
             },
+            required: ["title", "summary", "keyIdeas", "simpleExplanation", "flashcards"],
           },
-        }),
-      deadline
-    );
-
-  const rawText =
-    response.text?.trim();
-
+        },
+      }),
+    deadline,
+  );
+  const rawText = response.text?.trim();
   if (!rawText) {
-    throw new Error(
-      "Gemini returned an empty response."
-    );
+    throw new Error("Gemini returned an empty response.");
   }
-
-  let parsed:
-    Partial<AnalysisResult>;
-
+  let parsed: Partial<AnalysisResult>;
   try {
-    parsed =
-      JSON.parse(
-        rawText
-      ) as Partial<AnalysisResult>;
+    parsed = JSON.parse(rawText) as Partial<AnalysisResult>;
   } catch {
-    console.error(
-      "Invalid Gemini JSON:",
-      rawText
-    );
-
-    throw new Error(
-      "Gemini returned invalid JSON."
-    );
+    console.error("Invalid Gemini JSON:", rawText);
+    throw new Error("Gemini returned invalid JSON.");
   }
-
-  return cleanAnalysis(
-    parsed,
-    fileName
-  );
+  return cleanAnalysis(parsed, fileName);
 }
-
-async function analyzeFile(
-  ai: GoogleGenAI,
-  filePath: string,
-  fileName: string,
-  mimeType: string,
-  language: string,
-  fileSize: number,
-  deadline: number
-): Promise<AnalysisResult> {
-  const filePart =
-    await getFilePart(
-      ai,
-      filePath,
-      fileName,
-      mimeType,
-      fileSize,
-      deadline
-    );
-
-  return runAnalysis(
-    ai,
-    filePart,
-    fileName,
-    language,
-    deadline
-  );
+async function analyzeFile(ai: GoogleGenAI, filePath: string, fileName: string, mimeType: string, language: string, fileSize: number, deadline: number): Promise<AnalysisResult> {
+  const filePart = await getFilePart(ai, filePath, fileName, mimeType, fileSize, deadline);
+  return runAnalysis(ai, filePart, fileName, language, deadline);
 }
-
-function getHttpStatus(
-  error: unknown
-) {
-  const message =
-    getErrorMessage(
-      error
-    ).toLowerCase();
-
-  if (
-    message.includes(
-      "larger than the allowed limit"
-    ) ||
-    message.includes(
-      "larger than the 1 gb"
-    )
-  ) {
+function getHttpStatus(error: unknown) {
+  const message = getErrorMessage(error).toLowerCase();
+  if (isProviderOverloaded(error) || isTimeoutError(error)) {
+    return 503;
+  }
+  if (message.includes("larger than the allowed limit") || message.includes("larger than the 1 gb")) {
     return 413;
   }
-
-  if (
-    message.includes(
-      "not supported"
-    ) ||
-    message.includes(
-      "unsupported"
-    )
-  ) {
+  if (message.includes("not supported") || message.includes("unsupported")) {
     return 415;
   }
-
-  if (
-    message.includes("429") ||
-    message.includes(
-      "quota"
-    ) ||
-    message.includes(
-      "resource exhausted"
-    )
-  ) {
+  if (message.includes("429") || message.includes("quota") || message.includes("resource exhausted")) {
     return 429;
   }
-
-  if (
-    message.includes("400") ||
-    message.includes(
-      "invalid argument"
-    )
-  ) {
+  if (message.includes("400") || message.includes("invalid argument")) {
     return 400;
   }
-
-  if (
-    message.includes("403") ||
-    message.includes(
-      "permission denied"
-    )
-  ) {
+  if (message.includes("403") || message.includes("permission denied")) {
     return 403;
   }
-
-  if (
-    message.includes("404") ||
-    message.includes(
-      "not found"
-    )
-  ) {
+  if (message.includes("404") || message.includes("not found")) {
     return 404;
   }
-
   return 500;
 }
-
-export async function POST(
-  request: Request
-) {
-  const deadline =
-    Date.now() +
-    REQUEST_DEADLINE_MS;
-
+export async function POST(request: Request) {
+  const deadline = Date.now() + REQUEST_DEADLINE_MS;
   try {
-    const usageUser =
-      await requireUserForApi();
-
-    await consumeUsage(
-      usageUser.id,
-      "analyze"
-    );
+    const usageUser = await requireUserForApi();
+    await consumeUsage(usageUser.id, "analyze");
   } catch (usageError) {
-    const code =
-      getUsageErrorCode(
-        usageError
-      );
-
-    if (
-      code ===
-      "AUTH_REQUIRED"
-    ) {
+    const code = getUsageErrorCode(usageError);
+    if (code === "AUTH_REQUIRED") {
       return Response.json(
         {
-          error:
-            "Please sign in to analyze documents.",
+          error: "Please sign in to analyze documents.",
         },
         {
           status: 401,
-        }
+        },
       );
     }
-
-    if (
-      code ===
-      "USAGE_LIMIT_REACHED"
-    ) {
+    if (code === "USAGE_LIMIT_REACHED") {
       return Response.json(
         {
-          error:
-            usageError instanceof
-            Error
-              ? usageError.message
-              : "Usage limit reached.",
-          code:
-            "USAGE_LIMIT_REACHED",
+          error: usageError instanceof Error ? usageError.message : "Usage limit reached.",
+          code: "USAGE_LIMIT_REACHED",
         },
         {
           status: 429,
-        }
+        },
       );
     }
-
     throw usageError;
   }
-
-  const apiKey =
-    process.env.GEMINI_API_KEY;
-
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     return Response.json(
       {
         success: false,
-        error:
-          "GEMINI_API_KEY is missing. Add it to .env.local.",
+        error: "GEMINI_API_KEY is missing. Add it to .env.local.",
       },
       {
         status: 500,
-      }
+      },
     );
   }
-
-  let tempFilePath:
-    | string
-    | null = null;
-
+  let tempFilePath: string | null = null;
   try {
-    const fileNameHeader =
-      request.headers.get(
-        "x-file-name"
-      );
-
-    const mimeType =
-      request.headers.get(
-        "x-file-type"
-      ) ||
-      "application/octet-stream";
-
-    const language =
-      request.headers.get(
-        "x-language"
-      ) || "en";
-
-    if (
-      !fileNameHeader
-    ) {
+    const fileNameHeader = request.headers.get("x-file-name");
+    const mimeType = request.headers.get("x-file-type") || "application/octet-stream";
+    const language = request.headers.get("x-language") || "en";
+    if (!fileNameHeader) {
       return Response.json(
         {
           success: false,
-          error:
-            "File name is missing.",
+          error: "File name is missing.",
         },
         {
           status: 400,
-        }
+        },
       );
     }
-
-    let rawFileName:
-      string;
-
+    let rawFileName: string;
     try {
-      rawFileName =
-        decodeURIComponent(
-          fileNameHeader
-        );
+      rawFileName = decodeURIComponent(fileNameHeader);
     } catch {
-      rawFileName =
-        fileNameHeader;
+      rawFileName = fileNameHeader;
     }
-
-    const fileName =
-      sanitizeFileName(
-        rawFileName
-      );
-
+    const fileName = sanitizeFileName(rawFileName);
     if (!fileName) {
       return Response.json(
         {
           success: false,
-          error:
-            "Invalid file name.",
+          error: "Invalid file name.",
         },
         {
           status: 400,
-        }
+        },
       );
     }
-
-    if (
-      !ALLOWED_MIME_TYPES.has(
-        mimeType
-      )
-    ) {
+    if (!ALLOWED_MIME_TYPES.has(mimeType)) {
       return Response.json(
         {
           success: false,
-          error:
-            "This file type is not supported.",
+          error: "This file type is not supported.",
           mimeType,
         },
         {
           status: 415,
-        }
+        },
       );
     }
-
-    const maxFileSize =
-      getMaxFileSize(
-        mimeType
-      );
-
-    const contentLengthHeader =
-      request.headers.get(
-        "content-length"
-      );
-
-    const contentLengthNum =
-      contentLengthHeader &&
-      Number.isFinite(
-        Number(
-          contentLengthHeader
-        )
-      )
-        ? Number(
-            contentLengthHeader
-          )
-        : null;
-
-    if (
-      contentLengthNum !==
-        null &&
-      contentLengthNum >
-        maxFileSize
-    ) {
+    const maxFileSize = getMaxFileSize(mimeType);
+    const contentLengthHeader = request.headers.get("content-length");
+    const contentLengthNum = contentLengthHeader && Number.isFinite(Number(contentLengthHeader)) ? Number(contentLengthHeader) : null;
+    if (contentLengthNum !== null && contentLengthNum > maxFileSize) {
       return Response.json(
         {
           success: false,
-
-          error: `The file is larger than the allowed limit of ${formatBytes(
-            maxFileSize
-          )}.`,
-
-          limitBytes:
-            maxFileSize,
-
-          limit:
-            formatBytes(
-              maxFileSize
-            ),
+          error: `The file is larger than the allowed limit of ${formatBytes(maxFileSize)}.`,
+          limitBytes: maxFileSize,
+          limit: formatBytes(maxFileSize),
         },
         {
           status: 413,
-        }
+        },
       );
     }
-
-    const ai =
-      new GoogleGenAI({
-        apiKey,
-      });
-
+    const ai = new GoogleGenAI({
+      apiKey,
+    });
     let analysis: AnalysisResult;
     let size: number;
-
     // Fast path: when Content-Length already tells us the upload fits
     // inline, buffer it straight into memory and skip the temp-file
     // round trip entirely — writing the whole body to disk and then
     // immediately reading it back was pure overhead on every single
     // analysis, tiny files included. Large/unknown-size uploads still
     // stream to disk below with bounded memory, same as before.
-    if (
-      contentLengthNum !==
-        null &&
-      contentLengthNum <=
-        INLINE_MAX_FILE_SIZE
-    ) {
-      const buffer =
-        await readRequestBodyToBuffer(
-          request,
-          maxFileSize
-        );
-
+    if (contentLengthNum !== null && contentLengthNum <= INLINE_MAX_FILE_SIZE) {
+      const buffer = await readRequestBodyToBuffer(request, maxFileSize);
       size = buffer.length;
-
       if (size <= 0) {
         return Response.json(
           {
             success: false,
-            error:
-              "The uploaded file is empty.",
+            error: "The uploaded file is empty.",
           },
           {
             status: 400,
-          }
+          },
         );
       }
-
-      const filePart =
-        createPartFromBase64(
-          buffer.toString(
-            "base64"
-          ),
-          mimeType
-        );
-
-      analysis =
-        await runAnalysis(
-          ai,
-          filePart,
-          fileName,
-          language,
-          deadline
-        );
+      const filePart = createPartFromBase64(buffer.toString("base64"), mimeType);
+      analysis = await runAnalysis(ai, filePart, fileName, language, deadline);
     } else {
-      tempFilePath =
-        path.join(
-          os.tmpdir(),
-          `scholarai-${randomUUID()}-${fileName.replace(
-            /[^a-zA-Z0-9._-]/g,
-            "_"
-          )}`
-        );
-
-      size =
-        await saveRequestBodyToFile(
-          request,
-          tempFilePath,
-          maxFileSize
-        );
-
-      if (
-        size <= 0
-      ) {
+      tempFilePath = path.join(os.tmpdir(), `scholarai-${randomUUID()}-${fileName.replace(/[^a-zA-Z0-9._-]/g, "_")}`);
+      size = await saveRequestBodyToFile(request, tempFilePath, maxFileSize);
+      if (size <= 0) {
         return Response.json(
           {
             success: false,
-            error:
-              "The uploaded file is empty.",
+            error: "The uploaded file is empty.",
           },
           {
             status: 400,
-          }
+          },
         );
       }
-
-      analysis =
-        await analyzeFile(
-          ai,
-          tempFilePath,
-          fileName,
-          mimeType,
-          language,
-          size,
-          deadline
-        );
+      analysis = await analyzeFile(ai, tempFilePath, fileName, mimeType, language, size, deadline);
     }
-
     return Response.json(
       {
         success: true,
@@ -1513,44 +753,29 @@ export async function POST(
       },
       {
         status: 200,
-      }
+      },
     );
   } catch (error) {
-    console.error(
-      "ScholarAI analysis error:",
-      error
-    );
-
-    const details =
-      getErrorMessage(
-        error
-      );
-
-    const status =
-      getHttpStatus(
-        error
-      );
-
+    console.error("ScholarAI analysis error:", error);
+    const details = getErrorMessage(error);
+    const status = getHttpStatus(error);
+    const retryable = isProviderOverloaded(error) || isTimeoutError(error) || isRetryableError(error);
     return Response.json(
       {
         success: false,
-        error:
-          "ScholarAI could not analyze this document.",
+        error: getUserFacingError(error),
         details,
+        retryable,
         model: MODEL,
       },
       {
         status,
-      }
+      },
     );
   } finally {
-    if (
-      tempFilePath
-    ) {
+    if (tempFilePath) {
       try {
-        await fs.unlink(
-          tempFilePath
-        );
+        await fs.unlink(tempFilePath);
       } catch {
         // Temporary file may already be removed.
       }

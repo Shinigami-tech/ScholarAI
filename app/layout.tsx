@@ -1,17 +1,13 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
-
+// Previously loaded Geist/Geist Mono via next/font/google. That pulls
+// fonts.googleapis.com at build time — a real, unnecessary reliability
+// risk (a blocked/slow/unreachable Google Fonts CDN fails the whole
+// build) for CSS variables globals.css never actually referenced. The
+// body font stack below already relies entirely on the system font
+// stack, so removing this has no visual effect and zero external
+// dependency.
 export const metadata: Metadata = {
   title: "ScholarAI — AI-Powered Academic Intelligence",
   description:
@@ -36,10 +32,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html
-      lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
-    >
+    <html lang="en" className="h-full antialiased">
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );

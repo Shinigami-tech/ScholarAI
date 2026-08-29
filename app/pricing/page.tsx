@@ -1,7 +1,8 @@
 "use client";
 
-import Link from "next/link";
+import Script from "next/script";
 import { useEffect, useState } from "react";
+import { Check, FlaskConical, LogIn, UserRound } from "lucide-react";
 
 type Plan = {
   id: "FREE" | "PRO" | "PREMIUM";
@@ -12,9 +13,19 @@ type Plan = {
 };
 
 type CheckoutResponse = {
-  url?: string;
+  transactionId?: string;
   error?: string;
 };
+
+declare global {
+  interface Window {
+    Paddle?: {
+      Environment: { set: (env: string) => void };
+      Setup: (opts: { token: string }) => void;
+      Checkout: { open: (opts: Record<string, unknown>) => void };
+    };
+  }
+}
 
 const plans: Plan[] = [
   {
@@ -60,11 +71,14 @@ export default function PricingPage() {
     useState<Plan["id"] | null>(null);
   const [currentPlan, setCurrentPlan] =
     useState<Plan["id"] | null>(null);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [paddleReady, setPaddleReady] = useState(false);
 
   useEffect(() => {
     fetch("/api/auth/me")
       .then((response) => response.json())
       .then((data) => {
+        setAuthenticated(Boolean(data?.authenticated));
         if (data?.authenticated && data?.usage?.plan) {
           setCurrentPlan(data.usage.plan);
         }
@@ -72,11 +86,30 @@ export default function PricingPage() {
       .catch(() => {});
   }, []);
 
+  function initPaddle() {
+    if (!window.Paddle) return;
+    const env =
+      process.env.NEXT_PUBLIC_PADDLE_ENV === "production"
+        ? "production"
+        : "sandbox";
+    window.Paddle.Environment.set(env);
+    window.Paddle.Setup({
+      token: process.env.NEXT_PUBLIC_PADDLE_CLIENT_TOKEN || "",
+    });
+    setPaddleReady(true);
+  }
+
   async function subscribe(plan: Plan["id"]) {
     setMsg("");
     setLoadingPlan(plan);
 
     try {
+      if (!window.Paddle || !paddleReady) {
+        throw new Error(
+          "Checkout is still loading, try again in a moment."
+        );
+      }
+
       const response = await fetch("/api/checkout", {
         method: "POST",
         headers: {
@@ -94,13 +127,15 @@ export default function PricingPage() {
         );
       }
 
-      if (!data.url) {
+      if (!data.transactionId) {
         throw new Error(
-          "Checkout URL was not returned."
+          "Checkout transaction was not created."
         );
       }
 
-      window.location.assign(data.url);
+      window.Paddle.Checkout.open({
+        transactionId: data.transactionId,
+      });
     } catch (error) {
       setMsg(
         error instanceof Error
@@ -113,186 +148,118 @@ export default function PricingPage() {
   }
 
   return (
-    <main
-      style={{
-        minHeight: "100vh",
-        background: "#0a0a0b",
-        color: "#f4f4f5",
-        padding: 32,
-      }}
-    >
-      <div
-        style={{
-          maxWidth: 1100,
-          margin: "0 auto",
-        }}
-      >
-        <Link
-          href="/"
-          style={{ color: "#fff" }}
-        >
-          ← ScholarAI
-        </Link>
+    <main className="app-shell">
+      <Script
+        src="https://cdn.paddle.com/paddle/v2/paddle.js"
+        strategy="afterInteractive"
+        onLoad={initPaddle}
+      />
+      <div className="grid-background" />
+      <div className="ambient ambient-one" />
+      <div className="ambient ambient-two" />
 
-        <h1
-          style={{
-            fontSize: 44,
-            margin: "24px 0 8px",
-          }}
-        >
-          Plans
-        </h1>
-
-        <p
-          style={{
-            opacity: 0.7,
-            maxWidth: 650,
-          }}
-        >
-          Simple limits keep ScholarAI
-          sustainable while giving students
-          meaningful access to the learning
-          system.
-        </p>
-
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns:
-              "repeat(auto-fit, minmax(250px, 1fr))",
-            gap: 16,
-            marginTop: 30,
-          }}
-        >
-          {plans.map((plan) => (
-            <article
-              key={plan.id}
-              style={{
-                padding: 22,
-                border:
-                  currentPlan === plan.id
-                    ? "1px solid #a1a1aa"
-                    : "1px solid #27272a",
-                borderRadius: 18,
-                background: "#111113",
-                position: "relative",
-              }}
-            >
-              {currentPlan === plan.id && (
-                <span
-                  style={{
-                    position: "absolute",
-                    top: 18,
-                    right: 18,
-                    fontSize: 11,
-                    fontWeight: 700,
-                    letterSpacing: 0.4,
-                    textTransform: "uppercase",
-                    color: "#d4d4d8",
-                    border: "1px solid #3f3f46",
-                    borderRadius: 999,
-                    padding: "3px 9px",
-                  }}
-                >
-                  Current plan
-                </span>
-              )}
-
-              <h2>{plan.name}</h2>
-
-              <div
-                style={{
-                  fontSize: 38,
-                  fontWeight: 800,
-                }}
-              >
-                {plan.price}
-
-                <span
-                  style={{
-                    fontSize: 14,
-                    opacity: 0.6,
-                  }}
-                >
-                  {plan.id === "FREE"
-                    ? ""
-                    : " / month"}
-                </span>
-              </div>
-
-              <strong>{plan.limit}</strong>
-
-              <ul
-                style={{
-                  lineHeight: 1.8,
-                  paddingLeft: 20,
-                }}
-              >
-                {plan.features.map(
-                  (feature) => (
-                    <li key={feature}>
-                      {feature}
-                    </li>
-                  )
-                )}
-              </ul>
-
-              {plan.id !== "FREE" && (
-                <button
-                  onClick={() =>
-                    subscribe(plan.id)
-                  }
-                  disabled={
-                    loadingPlan !== null
-                  }
-                  style={{
-                    width: "100%",
-                    padding: 12,
-                    border: 0,
-                    borderRadius: 10,
-                    fontWeight: 700,
-                    cursor:
-                      loadingPlan !== null
-                        ? "wait"
-                        : "pointer",
-                    opacity:
-                      loadingPlan !== null
-                        ? 0.6
-                        : 1,
-                  }}
-                >
-                  {loadingPlan === plan.id
-                    ? "Processing..."
-                    : `Choose ${plan.name}`}
-                </button>
-              )}
-            </article>
-          ))}
+      <header className="topbar">
+        <div className="brand">
+          <div className="brand-mark">✦</div>
+          <div>
+            <div className="brand-name">
+              Scholar
+              <span>AI</span>
+            </div>
+            <div className="brand-caption">Plans</div>
+          </div>
         </div>
+        <div className="topbar-actions">
+          <a href="/tools" className="nav-link">
+            <FlaskConical size={15} />
+            <span>Learning Lab</span>
+          </a>
+          {authenticated ? (
+            <a href="/account" className="nav-link">
+              <UserRound size={15} />
+              <span>Account</span>
+            </a>
+          ) : (
+            <a href="/login" className="nav-link">
+              <LogIn size={15} />
+              <span>Sign in</span>
+            </a>
+          )}
+          <a href="/" className="nav-link">
+            ← ScholarAI
+          </a>
+        </div>
+      </header>
 
-        {msg && (
-          <p
-            style={{
-              marginTop: 20,
-              color: "#fbbf24",
-            }}
-          >
-            {msg}
-          </p>
-        )}
-
-        <p
-          style={{
-            marginTop: 30,
-            opacity: 0.55,
-            fontSize: 13,
-          }}
-        >
-          Final production pricing and usage
-          are subject to your configured Gemini
-          API tier and actual token consumption.
+      <section className="plans-hero">
+        <h1>Plans</h1>
+        <p>
+          Simple limits keep ScholarAI sustainable while giving students
+          meaningful access to the learning system.
         </p>
-      </div>
+      </section>
+
+      <section className="plans-grid">
+        {plans.map((plan) => (
+          <article
+            key={plan.id}
+            className={`plan-card ${
+              currentPlan === plan.id ? "plan-card-current" : ""
+            }`}
+          >
+            {currentPlan === plan.id && (
+              <span className="plan-current-badge">Current plan</span>
+            )}
+
+            <h2 className="plan-name">{plan.name}</h2>
+
+            <div className="plan-price">
+              {plan.price}
+              <span>{plan.id === "FREE" ? "" : "/ month"}</span>
+            </div>
+
+            <span className="plan-limit">{plan.limit}</span>
+
+            <ul className="plan-features">
+              {plan.features.map((feature) => (
+                <li key={feature}>
+                  <Check size={15} strokeWidth={2.6} />
+                  {feature}
+                </li>
+              ))}
+            </ul>
+
+            {plan.id === "FREE" ? (
+              <button className="plan-cta-outline" disabled>
+                {currentPlan === "FREE" || !currentPlan
+                  ? "Included"
+                  : "Free tier"}
+              </button>
+            ) : (
+              <button
+                className="plan-cta"
+                onClick={() => subscribe(plan.id)}
+                disabled={loadingPlan !== null}
+              >
+                {loadingPlan === plan.id
+                  ? "Processing..."
+                  : `Choose ${plan.name}`}
+              </button>
+            )}
+          </article>
+        ))}
+      </section>
+
+      {msg && (
+        <div className="plans-error-wrap">
+          <div className="plans-error">{msg}</div>
+        </div>
+      )}
+
+      <p className="plans-note">
+        Final production pricing and usage are subject to your configured
+        Gemini API tier and actual token consumption.
+      </p>
     </main>
   );
 }
